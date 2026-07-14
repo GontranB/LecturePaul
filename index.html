@@ -8,7 +8,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Bibliothèque" />
 <meta name="mobile-web-app-capable" content="yes" />
-<meta name="theme-color" content="#F0E9D8" />
+<meta name="theme-color" content="#FFFFFF" />
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
@@ -92,7 +92,7 @@
   .animate-spin { animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  html, body { background: #F0E9D8; overscroll-behavior-y: contain; }
+  html, body { background: #FFFFFF; overscroll-behavior-y: contain; }
   * { -webkit-tap-highlight-color: transparent; }
 </style>
 <script>
@@ -121,25 +121,25 @@
 <script src="https://unpkg.com/@zxing/library@latest/umd/index.min.js"></script>
 </head>
 <body>
-<div id="fallback-error" style="display:none; margin:16px; padding:12px; font-family: ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; color:#7A2E2E; background:#F7F2E5; border:1px solid #D9CFB8; border-radius:8px; font-size:13px;"></div>
-<div id="root"><p style="padding:20px; font-family: sans-serif; color:#6B6455;">Chargement de l'application…</p></div>
+<div id="fallback-error" style="display:none; margin:16px; padding:12px; font-family: ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; color:#111111; background:#F1F1F1; border:1px solid #E0E0E0; border-radius:8px; font-size:13px;"></div>
+<div id="root"><p style="padding:20px; font-family: sans-serif; color:#6E6E6E;">Chargement de l'application…</p></div>
 <script type="text/plain" id="app-source">
 const { useState, useEffect, useMemo, useRef } = React;
 
 // ---------- Design tokens ----------
 const COLORS = {
-  paper: '#F0E9D8', paperDark: '#E4D9C0', card: '#F7F2E5',
-  ink: '#232320', inkSoft: '#6B6455', oxblood: '#7A2E2E',
-  forest: '#2F4030', gold: '#B8862B', slate: '#3B4A5A',
-  gray: '#8B8378', line: '#D9CFB8',
+  paper: '#FFFFFF', paperDark: '#E6E6E6', card: '#F1F1F1',
+  ink: '#111111', inkSoft: '#6E6E6E', oxblood: '#5B8DBE',
+  forest: '#111111', gold: '#5B8DBE', slate: '#5B8DBE',
+  gray: '#A3A3A3', line: '#E0E0E0', accent: '#5B8DBE',
 };
 
 const STATUS_OPTIONS = [
-  { id: 'a_acheter', label: 'À acheter', color: COLORS.gold },
-  { id: 'a_lire', label: 'À lire', color: COLORS.slate },
-  { id: 'en_cours', label: 'En cours de lecture', color: COLORS.oxblood },
-  { id: 'lu', label: 'Lu', color: COLORS.forest },
-  { id: 'abandonne', label: 'Abandonné', color: COLORS.gray },
+  { id: 'a_acheter', label: 'À acheter', color: COLORS.gray },
+  { id: 'a_lire', label: 'À lire', color: COLORS.inkSoft },
+  { id: 'en_cours', label: 'En cours de lecture', color: COLORS.accent },
+  { id: 'lu', label: 'Lu', color: COLORS.ink },
+  { id: 'abandonne', label: 'Abandonné', color: '#C2C2C2' },
 ];
 
 const DEFAULT_CATEGORIES = ['Policier', 'Étranger', 'Roman graphique'];
@@ -381,7 +381,7 @@ function App() {
       else if (importMode === 'auteur') q = `inauthor:${raw}`;
       const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=20`;
       const res = await fetch(url);
-      if (!res.ok) throw new Error('request failed');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       const items = (data.items || []).map((item) => {
         const info = item.volumeInfo || {};
@@ -395,7 +395,7 @@ function App() {
       setImportResults(items);
       if (items.length === 0) setImportError('Aucun résultat. Essaie un autre mot-clé ou un autre mode de recherche.');
     } catch (e) {
-      setImportError("La recherche a échoué. Vérifie ta connexion et réessaie.");
+      setImportError('Échec de la recherche : ' + (e && e.message ? e.message : String(e)));
     } finally { setImportLoading(false); }
   };
 
@@ -451,22 +451,20 @@ function App() {
     const codeReader = new window.ZXing.BrowserMultiFormatReader();
     codeReaderRef.current = codeReader;
     let cancelled = false;
+    setScannerStatus('Vise le code-barres au dos du livre');
 
-    codeReader.listVideoInputDevices().then((devices) => {
-      if (cancelled) return;
-      if (!devices || devices.length === 0) { setScannerError('Aucune caméra détectée.'); return; }
-      const back = devices.find((d) => /back|arri[eè]re|rear|environment/i.test(d.label || ''));
-      const deviceId = (back || devices[devices.length - 1]).deviceId;
-      setScannerStatus('Vise le code-barres au dos du livre');
-      codeReader.decodeFromVideoDevice(deviceId, 'isbn-scanner-video', (result) => {
+    codeReader.decodeFromConstraints(
+      { audio: false, video: { facingMode: { ideal: 'environment' } } },
+      'isbn-scanner-video',
+      (result) => {
         if (cancelled || !result || !result.text) return;
         const digits = result.text.replace(/[^0-9Xx]/g, '');
         if (digits.length >= 8) handleScannedIsbn(digits);
-      });
-    }).catch((err) => {
+      }
+    ).catch((err) => {
       if (cancelled) return;
       if (err && err.name === 'NotAllowedError') setScannerError("Accès à la caméra refusé. Autorise-le dans les réglages du navigateur pour ce site.");
-      else setScannerError("Impossible d'accéder à la caméra.");
+      else setScannerError('Impossible d\'accéder à la caméra : ' + (err && err.message ? err.message : String(err)));
     });
 
     return () => { cancelled = true; try { codeReader.reset(); } catch (e) {} };
@@ -481,7 +479,7 @@ function App() {
     <div className="min-h-screen" style={{ backgroundColor: COLORS.paper }}>
       <div className="max-w-md mx-auto px-4 pb-24">
         {saveError && (
-          <div className="flex items-center gap-2 text-sm px-3 py-2 mt-3 rounded" style={{ backgroundColor: hexToRgba(COLORS.oxblood, 0.1), color: COLORS.oxblood }}>
+          <div className="flex items-center gap-2 text-sm px-3 py-2 mt-3 rounded" style={{ backgroundColor: COLORS.card, color: COLORS.ink }}>
             <Icon.Alert size={16} /> La sauvegarde a échoué (stockage plein ou bloqué par le navigateur).
           </div>
         )}
@@ -563,7 +561,7 @@ function App() {
           <div className="pt-6">
             <div className="flex items-center justify-between mb-4">
               <button onClick={() => setView('list')} className="flex items-center gap-1 text-sm" style={{ color: COLORS.inkSoft }}><Icon.ChevronLeft size={18} /> Retour</button>
-              {form.id && <button onClick={() => deleteBook(form.id)} className="flex items-center gap-1 text-sm" style={{ color: COLORS.oxblood }}><Icon.Trash size={15} /> Supprimer</button>}
+              {form.id && <button onClick={() => deleteBook(form.id)} className="flex items-center gap-1 text-sm" style={{ color: COLORS.inkSoft }}><Icon.Trash size={15} /> Supprimer</button>}
             </div>
 
             <h2 className="font-serif text-2xl mb-4" style={{ color: COLORS.ink }}>{form.id ? 'Modifier le livre' : 'Ajouter un livre'}</h2>
@@ -594,7 +592,7 @@ function App() {
                         {importLoading ? <Icon.Loader size={15} /> : <Icon.Search size={15} />} Chercher
                       </button>
                     </div>
-                    {importError && <div className="text-sm mt-2" style={{ color: COLORS.oxblood }}>{importError}</div>}
+                    {importError && <div className="text-sm mt-2" style={{ color: COLORS.ink }}>{importError}</div>}
                     {importResults.length > 0 && (
                       <div className="mt-3 flex flex-col gap-1.5 max-h-72 overflow-y-auto">
                         {importResults.map((item, idx) => (
