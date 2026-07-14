@@ -95,13 +95,34 @@
   html, body { background: #F0E9D8; overscroll-behavior-y: contain; }
   * { -webkit-tap-highlight-color: transparent; }
 </style>
+<script>
+  window.addEventListener('error', function (e) {
+    var el = document.getElementById('fallback-error');
+    if (!el) return;
+    var msg;
+    if (e.target && e.target !== window && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
+      msg = 'Échec de chargement d\'une ressource : ' + (e.target.src || e.target.href);
+    } else {
+      msg = (e.message || 'Erreur inconnue') + '  [' + (e.filename || '?') + ':' + (e.lineno || '?') + ']';
+    }
+    el.style.display = 'block';
+    el.textContent += msg + '\n\n';
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    var el = document.getElementById('fallback-error');
+    if (!el) return;
+    el.style.display = 'block';
+    el.textContent += 'Promesse rejetée : ' + (e.reason && e.reason.message ? e.reason.message : e.reason) + '\n\n';
+  });
+</script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://unpkg.com/@zxing/library@latest/umd/index.min.js"></script>
 </head>
 <body>
-<div id="root"></div>
+<div id="fallback-error" style="display:none; margin:16px; padding:12px; font-family: ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; color:#7A2E2E; background:#F7F2E5; border:1px solid #D9CFB8; border-radius:8px; font-size:13px;"></div>
+<div id="root"><p style="padding:20px; font-family: sans-serif; color:#6B6455;">Chargement de l'application…</p></div>
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useMemo, useRef } = React;
 
