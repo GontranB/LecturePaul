@@ -153,7 +153,13 @@ function hexToRgba(hex, alpha) {
 function normalize(s) { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
 function makeId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 function emptyBook() {
-  return { id: null, title: '', author: '', pageCount: '', isbn: '', status: 'a_lire', rating: 0, categories: [], cover: null };
+  return { id: null, title: '', author: '', pageCount: '', isbn: '', status: 'a_lire', rating: 0, categories: [], cover: null, startDate: '', endDate: '', pagesRead: '' };
+}
+function progressPercent(book) {
+  const total = parseInt(book.pageCount, 10);
+  const read = parseInt(book.pagesRead, 10);
+  if (!total || !read) return null;
+  return Math.max(0, Math.min(100, Math.round((read / total) * 100)));
 }
 
 // ---------- Icons (self-contained SVGs, no external icon library) ----------
@@ -287,6 +293,10 @@ function App() {
   const [importError, setImportError] = useState('');
   const [importedNote, setImportedNote] = useState(false);
 
+  const [apiKey, setApiKey] = useState('');
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [showApiKeyField, setShowApiKeyField] = useState(false);
+
   const [showScanner, setShowScanner] = useState(false);
   const [scannerStatus, setScannerStatus] = useState('');
   const [scannerError, setScannerError] = useState('');
@@ -301,16 +311,24 @@ function App() {
         const parsed = JSON.parse(raw);
         setBooks(Array.isArray(parsed.books) ? parsed.books : []);
         setCategories(Array.isArray(parsed.categories) && parsed.categories.length ? parsed.categories : DEFAULT_CATEGORIES);
+        if (parsed.apiKey) { setApiKey(parsed.apiKey); setApiKeyInput(parsed.apiKey); }
       }
     } catch (e) { /* première utilisation, ou stockage illisible : on part des valeurs par défaut */ }
     setLoading(false);
   }, []);
 
-  const persist = (newBooks, newCategories) => {
+  const persist = (newBooks, newCategories, newApiKey) => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ books: newBooks, categories: newCategories }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ books: newBooks, categories: newCategories, apiKey: newApiKey !== undefined ? newApiKey : apiKey }));
       setSaveError(false);
     } catch (e) { setSaveError(true); }
+  };
+
+  const saveApiKey = () => {
+    const key = apiKeyInput.trim();
+    setApiKey(key);
+    persist(books, categories, key);
+    setShowApiKeyField(false);
   };
 
   const filteredBooks = useMemo(() => {
@@ -370,48 +388,32 @@ function App() {
     setCategoryFilter((cur) => (cur.includes(cat) ? cur.filter((c) => c !== cat) : [...cur, cat]));
   };
 
-  // ---------- Open Library import (gratuit, sans clé) ----------
+  // ---------- Google Books import ----------
   const runImportSearch = async (overrideQuery, overrideMode) => {
     const raw = (overrideQuery !== undefined ? overrideQuery : importQuery).trim();
     const mode = overrideMode || importMode;
     if (!raw) return;
     setImportLoading(true); setImportError(''); setImportResults([]);
     try {
-      if (mode === 'isbn') {
-        const cleanIsbn = raw.replace(/[\s-]/g, '');
-        const url = `https://openlibrary.org/api/books?bibkeys=${encodeURIComponent('ISBN:' + cleanIsbn)}&format=json&jscmd=data`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        const book = data['ISBN:' + cleanIsbn];
-        if (!book) {
-          setImportError('Aucun résultat pour cet ISBN.');
-        } else {
-          setImportResults([{
-            title: book.title || 'Sans titre',
-            author: (book.authors || []).map((a) => a.name).join(', '),
-            pageCount: book.number_of_pages || '',
-            isbn: cleanIsbn,
-            cover: (book.cover && (book.cover.medium || book.cover.large || book.cover.small)) || null,
-          }]);
-        }
-      } else {
-        let url = 'https://openlibrary.org/search.json?';
-        url += mode === 'auteur' ? 'author=' + encodeURIComponent(raw) : 'title=' + encodeURIComponent(raw);
-        url += '&limit=20&fields=title,author_name,isbn,cover_i,number_of_pages_median';
-        const res = await fetch(url);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        const items = (data.docs || []).map((doc) => ({
-          title: doc.title || 'Sans titre',
-          author: (doc.author_name || []).join(', '),
-          pageCount: doc.number_of_pages_median || '',
-          isbn: (doc.isbn && doc.isbn[0]) || '',
-          cover: doc.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : null,
-        }));
-        setImportResults(items);
-        if (items.length === 0) setImportError('Aucun résultat. Essaie un autre mot-clé ou un autre mode de recherche.');
-      }
+      let q = raw;
+      if (mode === 'isbn') q = `isbn:${raw.replace(/[\s-]/g, '')}`;
+      else if (mode === 'titre') q = `intitle:${raw}`;
+      else if (mode === 'auteur') q = `inauthor:${raw}`;
+      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=20` + (apiKey ? `&key=${encodeURIComponent(apiKey)}` : '');
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('HTTP ' + res.status + (res.status === 429 ? ' (quota dépassé — ajoute une clé API ci-dessous)' : ''));
+      const data = await res.json();
+      const items = (data.items || []).map((item) => {
+        const info = item.volumeInfo || {};
+        const ids = info.industryIdentifiers || [];
+        const isbn13 = (ids.find((x) => x.type === 'ISBN_13') || {}).identifier;
+        const isbn10 = (ids.find((x) => x.type === 'ISBN_10') || {}).identifier;
+        let cover = (info.imageLinks && (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail)) || null;
+        if (cover) cover = cover.replace('http://', 'https://');
+        return { title: info.title || 'Sans titre', author: (info.authors || []).join(', '), pageCount: info.pageCount || '', isbn: isbn13 || isbn10 || '', cover };
+      });
+      setImportResults(items);
+      if (items.length === 0) setImportError('Aucun résultat. Essaie un autre mot-clé ou un autre mode de recherche.');
     } catch (e) {
       setImportError('Échec de la recherche : ' + (e && e.message ? e.message : String(e)));
     } finally { setImportLoading(false); }
@@ -424,19 +426,20 @@ function App() {
 
   const lookupIsbnSilently = async (isbn) => {
     try {
-      const cleanIsbn = isbn.replace(/[\s-]/g, '');
-      const url = `https://openlibrary.org/api/books?bibkeys=${encodeURIComponent('ISBN:' + cleanIsbn)}&format=json&jscmd=data`;
+      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent('isbn:' + isbn)}&maxResults=1` + (apiKey ? `&key=${encodeURIComponent(apiKey)}` : '');
       const res = await fetch(url);
       if (!res.ok) return;
       const data = await res.json();
-      const book = data['ISBN:' + cleanIsbn];
-      if (!book) return;
-      const cover = (book.cover && (book.cover.medium || book.cover.large || book.cover.small)) || null;
+      const item = (data.items || [])[0];
+      if (!item) return;
+      const info = item.volumeInfo || {};
+      let cover = (info.imageLinks && (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail)) || null;
+      if (cover) cover = cover.replace('http://', 'https://');
       setForm((f) => ({
         ...f,
-        title: f.title || book.title || f.title,
-        author: f.author || (book.authors || []).map((a) => a.name).join(', ') || f.author,
-        pageCount: f.pageCount || book.number_of_pages || f.pageCount,
+        title: f.title || info.title || f.title,
+        author: f.author || (info.authors || []).join(', ') || f.author,
+        pageCount: f.pageCount || info.pageCount || f.pageCount,
         cover: f.cover || cover,
       }));
       setImportedNote(true);
@@ -560,6 +563,7 @@ function App() {
               )}
               {filteredBooks.map((book) => {
                 const st = statusInfo(book.status);
+                const pct = progressPercent(book);
                 return (
                   <button key={book.id} onClick={() => openEditBook(book)} className="flex gap-3 p-2.5 rounded-lg text-left items-stretch" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}` }}>
                     <div className="w-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: st.color }} />
@@ -572,6 +576,14 @@ function App() {
                         <span className="text-xs px-2 py-0.5 rounded-full" style={{ backgroundColor: hexToRgba(st.color, 0.12), color: st.color }}>{st.label}</span>
                         {(book.categories || []).slice(0, 2).map((c) => <span key={c} className="text-xs px-2 py-0.5 rounded-full" style={{ backgroundColor: hexToRgba(COLORS.forest, 0.1), color: COLORS.forest }}>{c}</span>)}
                       </div>
+                      {pct !== null && (
+                        <div className="flex items-center gap-2 mt-1.5">
+                          <div className="flex-1 rounded-full overflow-hidden" style={{ height: 4, backgroundColor: COLORS.paperDark }}>
+                            <div style={{ height: 4, width: `${pct}%`, backgroundColor: COLORS.accent }} />
+                          </div>
+                          <span className="text-xs" style={{ color: COLORS.inkSoft }}>{pct}%</span>
+                        </div>
+                      )}
                     </div>
                   </button>
                 );
@@ -592,7 +604,7 @@ function App() {
             {!form.id && (
               <div className="mb-5 rounded-lg overflow-hidden" style={{ border: `1px solid ${COLORS.line}` }}>
                 <button onClick={() => setShowImport((s) => !s)} className="w-full flex items-center justify-between px-3 py-2.5" style={{ backgroundColor: COLORS.card }}>
-                  <span className="text-sm font-medium" style={{ color: COLORS.slate }}>Importer depuis Open Library</span>
+                  <span className="text-sm font-medium" style={{ color: COLORS.slate }}>Importer depuis Google Books</span>
                   <Icon.ChevronDown size={16} color={COLORS.inkSoft} />
                 </button>
                 {showImport && (
@@ -616,6 +628,23 @@ function App() {
                       </button>
                     </div>
                     {importError && <div className="text-sm mt-2" style={{ color: COLORS.ink }}>{importError}</div>}
+                    <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                      {!showApiKeyField ? (
+                        <button onClick={() => setShowApiKeyField(true)} className="text-xs underline" style={{ color: COLORS.inkSoft }}>
+                          {apiKey ? 'Clé API configurée ✓ — modifier' : 'Ajouter une clé API Google Books'}
+                        </button>
+                      ) : (
+                        <div>
+                          <div className="text-xs mb-1.5" style={{ color: COLORS.inkSoft }}>
+                            Créée gratuitement sur console.cloud.google.com (active « Books API », puis Identifiants → Créer une clé API).
+                          </div>
+                          <div className="flex gap-2">
+                            <input value={apiKeyInput} onChange={(e) => setApiKeyInput(e.target.value)} placeholder="AIza..." className="flex-1 px-3 py-2 rounded-lg text-sm outline-none font-mono" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} />
+                            <button onClick={saveApiKey} className="px-3 py-2 rounded-lg text-sm" style={{ backgroundColor: COLORS.accent, color: COLORS.card }}>Sauver</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                     {importResults.length > 0 && (
                       <div className="mt-3 flex flex-col gap-1.5 max-h-72 overflow-y-auto">
                         {importResults.map((item, idx) => (
@@ -673,6 +702,31 @@ function App() {
                 <div className="flex flex-wrap gap-2 mt-1.5">
                   {STATUS_OPTIONS.map((s) => <Pill key={s.id} active={form.status === s.id} color={s.color} onClick={() => setForm((f) => ({ ...f, status: s.id }))}>{s.label}</Pill>)}
                 </div>
+              </div>
+
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <label className="text-xs uppercase tracking-wide" style={{ color: COLORS.inkSoft }}>Début de lecture</label>
+                  <input type="date" value={form.startDate || ''} onChange={(e) => setForm((f) => ({ ...f, startDate: e.target.value }))} className="w-full px-3 py-2 rounded-lg text-sm outline-none mt-1" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} />
+                </div>
+                <div className="flex-1">
+                  <label className="text-xs uppercase tracking-wide" style={{ color: COLORS.inkSoft }}>Fin de lecture</label>
+                  <input type="date" value={form.endDate || ''} onChange={(e) => setForm((f) => ({ ...f, endDate: e.target.value }))} className="w-full px-3 py-2 rounded-lg text-sm outline-none mt-1" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} />
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="text-xs uppercase tracking-wide" style={{ color: COLORS.inkSoft }}>Pages lues</label>
+                  {progressPercent(form) !== null && <span className="text-xs font-medium" style={{ color: COLORS.accent }}>{progressPercent(form)}%</span>}
+                </div>
+                <input type="number" min="0" value={form.pagesRead || ''} onChange={(e) => setForm((f) => ({ ...f, pagesRead: e.target.value }))} className="w-full px-3 py-2 rounded-lg text-sm outline-none mt-1" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} placeholder="0" />
+                {progressPercent(form) !== null && (
+                  <div className="mt-1.5 rounded-full overflow-hidden" style={{ height: 6, backgroundColor: COLORS.card }}>
+                    <div style={{ height: 6, width: `${progressPercent(form)}%`, backgroundColor: COLORS.accent, transition: 'width 0.2s' }} />
+                  </div>
+                )}
+                {!form.pageCount && <div className="text-xs mt-1" style={{ color: COLORS.inkSoft }}>Renseigne le nombre de pages total ci-dessus pour voir le pourcentage.</div>}
               </div>
 
               <div>
