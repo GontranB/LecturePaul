@@ -290,7 +290,12 @@ function App() {
   const [showScanner, setShowScanner] = useState(false);
   const [scannerStatus, setScannerStatus] = useState('');
   const [scannerError, setScannerError] = useState('');
+  const [scannerTarget, setScannerTarget] = useState('manual'); // 'manual' = champ ISBN du formulaire | 'import' = recherche
   const codeReaderRef = useRef(null);
+
+  const [apiKey, setApiKey] = useState('');
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [showApiKeyField, setShowApiKeyField] = useState(false);
 
   // ---------- Load / persist (localStorage — this file runs outside the Claude sandbox) ----------
   useEffect(() => {
@@ -300,16 +305,24 @@ function App() {
         const parsed = JSON.parse(raw);
         setBooks(Array.isArray(parsed.books) ? parsed.books : []);
         setCategories(Array.isArray(parsed.categories) && parsed.categories.length ? parsed.categories : DEFAULT_CATEGORIES);
+        if (parsed.apiKey) { setApiKey(parsed.apiKey); setApiKeyInput(parsed.apiKey); }
       }
     } catch (e) { /* première utilisation, ou stockage illisible : on part des valeurs par défaut */ }
     setLoading(false);
   }, []);
 
-  const persist = (newBooks, newCategories) => {
+  const persist = (newBooks, newCategories, newApiKey) => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ books: newBooks, categories: newCategories }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ books: newBooks, categories: newCategories, apiKey: newApiKey !== undefined ? newApiKey : apiKey }));
       setSaveError(false);
     } catch (e) { setSaveError(true); }
+  };
+
+  const saveApiKey = () => {
+    const key = apiKeyInput.trim();
+    setApiKey(key);
+    persist(books, categories, key);
+    setShowApiKeyField(false);
   };
 
   const filteredBooks = useMemo(() => {
@@ -370,18 +383,19 @@ function App() {
   };
 
   // ---------- Google Books import ----------
-  const runImportSearch = async () => {
-    const raw = importQuery.trim();
+  const runImportSearch = async (overrideQuery, overrideMode) => {
+    const raw = (overrideQuery !== undefined ? overrideQuery : importQuery).trim();
+    const mode = overrideMode || importMode;
     if (!raw) return;
     setImportLoading(true); setImportError(''); setImportResults([]);
     try {
       let q = raw;
-      if (importMode === 'isbn') q = `isbn:${raw.replace(/[\s-]/g, '')}`;
-      else if (importMode === 'titre') q = `intitle:${raw}`;
-      else if (importMode === 'auteur') q = `inauthor:${raw}`;
-      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=20`;
+      if (mode === 'isbn') q = `isbn:${raw.replace(/[\s-]/g, '')}`;
+      else if (mode === 'titre') q = `intitle:${raw}`;
+      else if (mode === 'auteur') q = `inauthor:${raw}`;
+      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=20` + (apiKey ? `&key=${encodeURIComponent(apiKey)}` : '');
       const res = await fetch(url);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
+      if (!res.ok) throw new Error('HTTP ' + res.status + (res.status === 429 ? ' (quota dépassé — ajoute une clé API ci-dessous)' : ''));
       const data = await res.json();
       const items = (data.items || []).map((item) => {
         const info = item.volumeInfo || {};
@@ -406,7 +420,7 @@ function App() {
 
   const lookupIsbnSilently = async (isbn) => {
     try {
-      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent('isbn:' + isbn)}&maxResults=1`;
+      const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent('isbn:' + isbn)}&maxResults=1` + (apiKey ? `&key=${encodeURIComponent(apiKey)}` : '');
       const res = await fetch(url);
       if (!res.ok) return;
       const data = await res.json();
@@ -427,15 +441,21 @@ function App() {
   };
 
   // ---------- Camera ISBN scanner ----------
-  const openScanner = () => { setScannerError(''); setScannerStatus('Initialisation de la caméra...'); setShowScanner(true); };
+  const openScanner = (target) => { setScannerTarget(target || 'manual'); setScannerError(''); setScannerStatus('Initialisation de la caméra...'); setShowScanner(true); };
   const closeScanner = () => {
     if (codeReaderRef.current) { try { codeReaderRef.current.reset(); } catch (e) {} }
     setShowScanner(false);
   };
   const handleScannedIsbn = (isbn) => {
     closeScanner();
-    setForm((f) => ({ ...f, isbn }));
-    lookupIsbnSilently(isbn);
+    if (scannerTarget === 'import') {
+      setImportMode('isbn');
+      setImportQuery(isbn);
+      runImportSearch(isbn, 'isbn');
+    } else {
+      setForm((f) => ({ ...f, isbn }));
+      lookupIsbnSilently(isbn);
+    }
   };
 
   useEffect(() => {
@@ -584,15 +604,32 @@ function App() {
                         placeholder={importMode === 'isbn' ? '978...' : importMode === 'auteur' ? "Nom de l'auteur" : 'Titre du livre'}
                         className="flex-1 px-3 py-2 rounded-lg text-sm outline-none" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} />
                       {importMode === 'isbn' && (
-                        <button onClick={openScanner} className="px-3 py-2 rounded-lg text-sm flex items-center gap-1" style={{ backgroundColor: COLORS.forest, color: COLORS.card }}>
+                        <button onClick={() => openScanner('import')} className="px-3 py-2 rounded-lg text-sm flex items-center gap-1" style={{ backgroundColor: COLORS.forest, color: COLORS.card }}>
                           <Icon.Camera size={15} />
                         </button>
                       )}
-                      <button onClick={runImportSearch} className="px-3 py-2 rounded-lg text-sm flex items-center gap-1" style={{ backgroundColor: COLORS.slate, color: COLORS.card }}>
+                      <button onClick={() => runImportSearch()} className="px-3 py-2 rounded-lg text-sm flex items-center gap-1" style={{ backgroundColor: COLORS.slate, color: COLORS.card }}>
                         {importLoading ? <Icon.Loader size={15} /> : <Icon.Search size={15} />} Chercher
                       </button>
                     </div>
                     {importError && <div className="text-sm mt-2" style={{ color: COLORS.ink }}>{importError}</div>}
+                    <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+                      {!showApiKeyField ? (
+                        <button onClick={() => setShowApiKeyField(true)} className="text-xs underline" style={{ color: COLORS.inkSoft }}>
+                          {apiKey ? 'Clé API configurée ✓ — modifier' : 'Erreur 429 ? Ajoute une clé API Google Books (gratuite)'}
+                        </button>
+                      ) : (
+                        <div>
+                          <div className="text-xs mb-1.5" style={{ color: COLORS.inkSoft }}>
+                            Clé API Google Books — créée gratuitement sur console.cloud.google.com (active « Books API », puis Identifiants → Créer une clé API).
+                          </div>
+                          <div className="flex gap-2">
+                            <input value={apiKeyInput} onChange={(e) => setApiKeyInput(e.target.value)} placeholder="AIza..." className="flex-1 px-3 py-2 rounded-lg text-sm outline-none font-mono" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} />
+                            <button onClick={saveApiKey} className="px-3 py-2 rounded-lg text-sm" style={{ backgroundColor: COLORS.accent, color: COLORS.card }}>Sauver</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                     {importResults.length > 0 && (
                       <div className="mt-3 flex flex-col gap-1.5 max-h-72 overflow-y-auto">
                         {importResults.map((item, idx) => (
@@ -639,7 +676,7 @@ function App() {
                 <div className="flex-1">
                   <div className="flex items-center justify-between">
                     <label className="text-xs uppercase tracking-wide" style={{ color: COLORS.inkSoft }}>ISBN</label>
-                    <button onClick={openScanner} className="flex items-center gap-1 text-xs" style={{ color: COLORS.forest }}><Icon.Camera size={13} /> Scanner</button>
+                    <button onClick={() => openScanner('manual')} className="flex items-center gap-1 text-xs" style={{ color: COLORS.forest }}><Icon.Camera size={13} /> Scanner</button>
                   </div>
                   <input value={form.isbn} onChange={(e) => setForm((f) => ({ ...f, isbn: e.target.value }))} className="w-full px-3 py-2 rounded-lg text-sm outline-none mt-1 font-mono" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} placeholder="978..." />
                 </div>
