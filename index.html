@@ -331,6 +331,46 @@ function App() {
     setShowApiKeyField(false);
   };
 
+  // ---------- Export / Import (fichier de sauvegarde local, indépendant du navigateur) ----------
+  const fileInputRef = useRef(null);
+  const exportData = () => {
+    const payload = JSON.stringify({ books, categories, exportedAt: new Date().toISOString() }, null, 2);
+    const blob = new Blob([payload], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const date = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `bibliotheque-sauvegarde-${date}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+  const triggerImport = () => { if (fileInputRef.current) fileInputRef.current.click(); };
+  const importData = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!Array.isArray(parsed.books)) throw new Error('Fichier invalide (pas de liste de livres).');
+        const count = parsed.books.length;
+        const ok = window.confirm(`Remplacer ta bibliothèque actuelle (${books.length} livre${books.length !== 1 ? 's' : ''}) par cette sauvegarde (${count} livre${count !== 1 ? 's' : ''}) ?\n\nCette action est irréversible.`);
+        if (!ok) return;
+        const newCategories = Array.isArray(parsed.categories) && parsed.categories.length ? parsed.categories : DEFAULT_CATEGORIES;
+        setBooks(parsed.books);
+        setCategories(newCategories);
+        persist(parsed.books, newCategories);
+      } catch (err) {
+        alert('Impossible de lire ce fichier : ' + (err && err.message ? err.message : String(err)));
+      } finally {
+        e.target.value = '';
+      }
+    };
+    reader.readAsText(file);
+  };
+
   const filteredBooks = useMemo(() => {
     const q = normalize(searchQuery);
     return books.filter((b) => {
@@ -518,6 +558,11 @@ function App() {
                   <div className="text-xs font-sans uppercase tracking-widest" style={{ color: COLORS.gold, letterSpacing: '0.15em' }}>Catalogue personnel</div>
                   <h1 className="font-serif text-3xl mt-0.5" style={{ color: COLORS.ink }}>Bibliothèque</h1>
                   <div className="text-sm mt-1" style={{ color: COLORS.inkSoft }}>{books.length} livre{books.length !== 1 ? 's' : ''} · {luCount} lu{luCount !== 1 ? 's' : ''}</div>
+                  <div className="flex gap-3 mt-1.5">
+                    <button onClick={exportData} className="text-xs underline" style={{ color: COLORS.accent }}>Exporter (sauvegarde)</button>
+                    <button onClick={triggerImport} className="text-xs underline" style={{ color: COLORS.accent }}>Importer</button>
+                    <input ref={fileInputRef} type="file" accept="application/json" onChange={importData} style={{ display: 'none' }} />
+                  </div>
                 </div>
                 <button onClick={openNewBook} className="rounded-full p-3 flex-shrink-0" style={{ backgroundColor: COLORS.oxblood, color: COLORS.card }} aria-label="Ajouter un livre"><Icon.Plus size={20} /></button>
               </div>
