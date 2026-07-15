@@ -331,16 +331,51 @@ function App() {
     setShowApiKeyField(false);
   };
 
-  // ---------- Export / Import (fichier de sauvegarde local, indépendant du navigateur) ----------
+  // ---------- Export / Import CSV (fichier de sauvegarde local, indépendant du navigateur) ----------
+  const CSV_HEADERS = ['Titre', 'Auteur', 'Pages', 'ISBN', 'Statut', 'Note', 'Categories', 'Couverture', 'DebutLecture', 'FinLecture', 'PagesLues'];
+  const csvEscape = (field) => {
+    const str = field === null || field === undefined ? '' : String(field);
+    if (/[;"\n\r]/.test(str)) return '"' + str.replace(/"/g, '""') + '"';
+    return str;
+  };
+  const parseCSV = (text) => {
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    const rows = []; let row = []; let field = ''; let inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inQuotes) {
+        if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; } }
+        else field += c;
+      } else {
+        if (c === '"') inQuotes = true;
+        else if (c === ';') { row.push(field); field = ''; }
+        else if (c === '\r') { /* ignoré, la fin de ligne est gérée par \n */ }
+        else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+        else field += c;
+      }
+    }
+    if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+    return rows.filter((r) => r.some((c) => c !== ''));
+  };
+
   const fileInputRef = useRef(null);
   const exportData = () => {
-    const payload = JSON.stringify({ books, categories, exportedAt: new Date().toISOString() }, null, 2);
-    const blob = new Blob([payload], { type: 'application/json' });
+    const rows = [CSV_HEADERS.map(csvEscape).join(';')];
+    books.forEach((b) => {
+      const st = statusInfo(b.status);
+      rows.push([
+        csvEscape(b.title), csvEscape(b.author), csvEscape(b.pageCount), csvEscape(b.isbn),
+        csvEscape(st.label), csvEscape(b.rating || ''), csvEscape((b.categories || []).join(', ')),
+        csvEscape(b.cover || ''), csvEscape(b.startDate || ''), csvEscape(b.endDate || ''), csvEscape(b.pagesRead || ''),
+      ].join(';'));
+    });
+    const csv = '\uFEFF' + rows.join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const date = new Date().toISOString().slice(0, 10);
     a.href = url;
-    a.download = `bibliotheque-sauvegarde-${date}.json`;
+    a.download = `bibliotheque-sauvegarde-${date}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -353,22 +388,48 @@ function App() {
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const parsed = JSON.parse(reader.result);
-        if (!Array.isArray(parsed.books)) throw new Error('Fichier invalide (pas de liste de livres).');
-        const count = parsed.books.length;
-        const ok = window.confirm(`Remplacer ta bibliothèque actuelle (${books.length} livre${books.length !== 1 ? 's' : ''}) par cette sauvegarde (${count} livre${count !== 1 ? 's' : ''}) ?\n\nCette action est irréversible.`);
+        const rows = parseCSV(String(reader.result));
+        if (rows.length < 1) throw new Error('Fichier vide.');
+        const header = rows[0].map((h) => h.trim());
+        const idx = (name) => header.indexOf(name);
+        const iTitre = idx('Titre'), iAuteur = idx('Auteur'), iPages = idx('Pages'), iIsbn = idx('ISBN'),
+          iStatut = idx('Statut'), iNote = idx('Note'), iCategories = idx('Categories'),
+          iCouverture = idx('Couverture'), iDebut = idx('DebutLecture'), iFin = idx('FinLecture'), iPagesLues = idx('PagesLues');
+        if (iTitre === -1) throw new Error('Colonne "Titre" introuvable — ce fichier vient-il bien d\'un export de cette app ?');
+        const newBooks = rows.slice(1).map((r) => {
+          const statutLabel = iStatut !== -1 ? (r[iStatut] || '') : '';
+          const statusMatch = STATUS_OPTIONS.find((s) => normalize(s.label) === normalize(statutLabel) || s.id === statutLabel);
+          const catRaw = iCategories !== -1 ? (r[iCategories] || '') : '';
+          return {
+            id: makeId(),
+            title: r[iTitre] || '',
+            author: iAuteur !== -1 ? (r[iAuteur] || '') : '',
+            pageCount: iPages !== -1 ? (r[iPages] || '') : '',
+            isbn: iIsbn !== -1 ? (r[iIsbn] || '') : '',
+            status: statusMatch ? statusMatch.id : 'a_lire',
+            rating: iNote !== -1 && r[iNote] ? (parseFloat(r[iNote]) || 0) : 0,
+            categories: catRaw ? catRaw.split(',').map((c) => c.trim()).filter(Boolean) : [],
+            cover: iCouverture !== -1 && r[iCouverture] ? r[iCouverture] : null,
+            startDate: iDebut !== -1 ? (r[iDebut] || '') : '',
+            endDate: iFin !== -1 ? (r[iFin] || '') : '',
+            pagesRead: iPagesLues !== -1 ? (r[iPagesLues] || '') : '',
+          };
+        }).filter((b) => b.title);
+        const ok = window.confirm(`Remplacer ta bibliothèque actuelle (${books.length} livre${books.length !== 1 ? 's' : ''}) par ce fichier (${newBooks.length} livre${newBooks.length !== 1 ? 's' : ''}) ?\n\nCette action est irréversible.`);
         if (!ok) return;
-        const newCategories = Array.isArray(parsed.categories) && parsed.categories.length ? parsed.categories : DEFAULT_CATEGORIES;
-        setBooks(parsed.books);
+        const allCats = new Set(categories);
+        newBooks.forEach((b) => (b.categories || []).forEach((c) => allCats.add(c)));
+        const newCategories = Array.from(allCats);
+        setBooks(newBooks);
         setCategories(newCategories);
-        persist(parsed.books, newCategories);
+        persist(newBooks, newCategories);
       } catch (err) {
         alert('Impossible de lire ce fichier : ' + (err && err.message ? err.message : String(err)));
       } finally {
         e.target.value = '';
       }
     };
-    reader.readAsText(file);
+    reader.readAsText(file, 'UTF-8');
   };
 
   const filteredBooks = useMemo(() => {
@@ -559,9 +620,9 @@ function App() {
                   <h1 className="font-serif text-3xl mt-0.5" style={{ color: COLORS.ink }}>Bibliothèque</h1>
                   <div className="text-sm mt-1" style={{ color: COLORS.inkSoft }}>{books.length} livre{books.length !== 1 ? 's' : ''} · {luCount} lu{luCount !== 1 ? 's' : ''}</div>
                   <div className="flex gap-3 mt-1.5">
-                    <button onClick={exportData} className="text-xs underline" style={{ color: COLORS.accent }}>Exporter (sauvegarde)</button>
-                    <button onClick={triggerImport} className="text-xs underline" style={{ color: COLORS.accent }}>Importer</button>
-                    <input ref={fileInputRef} type="file" accept="application/json" onChange={importData} style={{ display: 'none' }} />
+                    <button onClick={exportData} className="text-xs underline" style={{ color: COLORS.accent }}>Exporter (CSV)</button>
+                    <button onClick={triggerImport} className="text-xs underline" style={{ color: COLORS.accent }}>Importer (CSV)</button>
+                    <input ref={fileInputRef} type="file" accept=".csv,text/csv" onChange={importData} style={{ display: 'none' }} />
                   </div>
                 </div>
                 <button onClick={openNewBook} className="rounded-full p-3 flex-shrink-0" style={{ backgroundColor: COLORS.oxblood, color: COLORS.card }} aria-label="Ajouter un livre"><Icon.Plus size={20} /></button>
