@@ -530,6 +530,79 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
+  const parseCSV = (text) => {
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    const rows = []; let row = []; let field = ''; let inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inQuotes) {
+        if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; } }
+        else field += c;
+      } else {
+        if (c === '"') inQuotes = true;
+        else if (c === ';') { row.push(field); field = ''; }
+        else if (c === '\r') { /* ignoré, la fin de ligne est gérée par \n */ }
+        else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+        else field += c;
+      }
+    }
+    if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+    return rows.filter((r) => r.some((c) => c !== ''));
+  };
+
+  const fileInputRef = useRef(null);
+  const triggerImport = () => { if (fileInputRef.current) fileInputRef.current.click(); };
+  const importData = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const rows = parseCSV(String(reader.result));
+        if (rows.length < 1) throw new Error('Fichier vide.');
+        const header = rows[0].map((h) => h.trim());
+        const idx = (name) => header.indexOf(name);
+        const iTitre = idx('Titre'), iAuteur = idx('Auteur'), iPages = idx('Pages'), iIsbn = idx('ISBN'),
+          iStatut = idx('Statut'), iNote = idx('Note'), iCategories = idx('Categories'),
+          iCouverture = idx('Couverture'), iDebut = idx('DebutLecture'), iFin = idx('FinLecture'), iPagesLues = idx('PagesLues');
+        if (iTitre === -1) throw new Error('Colonne "Titre" introuvable — ce fichier vient-il bien d\'un export de cette app ?');
+        const newBooks = rows.slice(1).map((r) => {
+          const statutLabel = iStatut !== -1 ? (r[iStatut] || '') : '';
+          const statusMatch = STATUS_OPTIONS.find((s) => normalize(s.label) === normalize(statutLabel) || s.id === statutLabel);
+          const catRaw = iCategories !== -1 ? (r[iCategories] || '') : '';
+          return {
+            title: r[iTitre] || '',
+            author: iAuteur !== -1 ? (r[iAuteur] || '') : '',
+            pageCount: iPages !== -1 ? (r[iPages] || '') : '',
+            isbn: iIsbn !== -1 ? (r[iIsbn] || '') : '',
+            status: statusMatch ? statusMatch.id : 'a_lire',
+            rating: iNote !== -1 && r[iNote] ? (parseFloat(r[iNote]) || 0) : 0,
+            categories: catRaw ? catRaw.split(',').map((c) => c.trim()).filter(Boolean) : [],
+            cover: iCouverture !== -1 && r[iCouverture] ? r[iCouverture] : null,
+            startDate: iDebut !== -1 ? (r[iDebut] || '') : '',
+            endDate: iFin !== -1 ? (r[iFin] || '') : '',
+            pagesRead: iPagesLues !== -1 ? (r[iPagesLues] || '') : '',
+          };
+        }).filter((b) => b.title);
+        if (newBooks.length === 0) throw new Error('Aucun livre valide (avec un titre) trouvé dans ce fichier.');
+        const ok = window.confirm(`Ajouter ${newBooks.length} livre${newBooks.length !== 1 ? 's' : ''} depuis ce fichier à ta bibliothèque Airtable (${books.length} actuellement) ?\n\nCeci ajoute des enregistrements, ça ne remplace rien.`);
+        if (!ok) return;
+        setSyncing(true); setSaveError('');
+        for (let i = 0; i < newBooks.length; i += 10) {
+          const chunk = newBooks.slice(i, i + 10).map((b) => ({ fields: bookToFields(b) }));
+          await airtableFetch('', { method: 'POST', body: JSON.stringify({ records: chunk, typecast: true }) });
+        }
+        await refreshBooks();
+      } catch (err) {
+        setSaveError('Échec de l\'import : ' + (err && err.message ? err.message : String(err)));
+      } finally {
+        setSyncing(false);
+        e.target.value = '';
+      }
+    };
+    reader.readAsText(file, 'UTF-8');
+  };
+
   // ---------- Google Books import ----------
   const runImportSearch = async (overrideQuery, overrideMode) => {
     const raw = (overrideQuery !== undefined ? overrideQuery : importQuery).trim();
@@ -693,9 +766,11 @@ function App() {
                     {books.length} livre{books.length !== 1 ? 's' : ''} · {luCount} lu{luCount !== 1 ? 's' : ''}
                     {syncing && <Icon.Loader size={12} color={COLORS.accent} />}
                   </div>
-                  <div className="flex gap-3 mt-1.5">
+                  <div className="flex gap-3 mt-1.5 flex-wrap">
                     <button onClick={exportData} className="text-xs underline" style={{ color: COLORS.accent }}>Exporter (CSV)</button>
-                    <button onClick={() => refreshBooks().catch((e) => setSaveError('Échec du rafraîchissement : ' + (e && e.message ? e.message : String(e))))} className="text-xs underline" style={{ color: COLORS.accent }}>Rafraîchir</button>
+                    <button onClick={triggerImport} className="text-xs underline" style={{ color: COLORS.accent }}>Importer (CSV)</button>
+                    <input ref={fileInputRef} type="file" accept=".csv,text/csv" onChange={importData} style={{ display: 'none' }} />
+                    <button onClick={() => { setSyncing(true); setSaveError(''); refreshBooks().catch((e) => setSaveError('Échec du rafraîchissement : ' + (e && e.message ? e.message : String(e)))).finally(() => setSyncing(false)); }} className="text-xs underline" style={{ color: COLORS.accent }}>Rafraîchir</button>
                     <button onClick={() => { setShowAirtableField(true); setView('settings'); }} className="text-xs underline" style={{ color: COLORS.inkSoft }}>Réglages</button>
                   </div>
                 </div>
