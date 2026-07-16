@@ -144,6 +144,8 @@ const STATUS_OPTIONS = [
 
 const DEFAULT_CATEGORIES = ['Policier', 'Étranger', 'Roman graphique'];
 const STORAGE_KEY = 'biblio-data';
+const AIRTABLE_BASE_ID = 'appQtaT8cHEAQuaTp';
+const AIRTABLE_TABLE_ID = 'tblNKjCq0nrvoolQi';
 
 function statusInfo(id) { return STATUS_OPTIONS.find((s) => s.id === id) || STATUS_OPTIONS[1]; }
 function hexToRgba(hex, alpha) {
@@ -274,7 +276,8 @@ function App() {
   const [books, setBooks] = useState([]);
   const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
   const [loading, setLoading] = useState(true);
-  const [saveError, setSaveError] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [syncing, setSyncing] = useState(false);
 
   const [view, setView] = useState('list');
   const [form, setForm] = useState(emptyBook());
@@ -297,6 +300,10 @@ function App() {
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [showApiKeyField, setShowApiKeyField] = useState(false);
 
+  const [airtableToken, setAirtableToken] = useState('');
+  const [airtableTokenInput, setAirtableTokenInput] = useState('');
+  const [showAirtableField, setShowAirtableField] = useState(false);
+
   const [showScanner, setShowScanner] = useState(false);
   const [scannerStatus, setScannerStatus] = useState('');
   const [scannerError, setScannerError] = useState('');
@@ -309,56 +316,197 @@ function App() {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        setBooks(Array.isArray(parsed.books) ? parsed.books : []);
-        setCategories(Array.isArray(parsed.categories) && parsed.categories.length ? parsed.categories : DEFAULT_CATEGORIES);
         if (parsed.apiKey) { setApiKey(parsed.apiKey); setApiKeyInput(parsed.apiKey); }
+        if (parsed.airtableToken) { setAirtableToken(parsed.airtableToken); setAirtableTokenInput(parsed.airtableToken); }
       }
     } catch (e) { /* première utilisation, ou stockage illisible : on part des valeurs par défaut */ }
     setLoading(false);
   }, []);
 
-  const persist = (newBooks, newCategories, newApiKey) => {
+  const persistSettings = (newApiKey, newAirtableToken) => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ books: newBooks, categories: newCategories, apiKey: newApiKey !== undefined ? newApiKey : apiKey }));
-      setSaveError(false);
-    } catch (e) { setSaveError(true); }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        apiKey: newApiKey !== undefined ? newApiKey : apiKey,
+        airtableToken: newAirtableToken !== undefined ? newAirtableToken : airtableToken,
+      }));
+    } catch (e) { /* réglages non critiques : on ignore une éventuelle erreur de stockage */ }
   };
 
   const saveApiKey = () => {
     const key = apiKeyInput.trim();
     setApiKey(key);
-    persist(books, categories, key);
+    persistSettings(key, undefined);
     setShowApiKeyField(false);
   };
+  const saveAirtableToken = () => {
+    const token = airtableTokenInput.trim();
+    setAirtableToken(token);
+    persistSettings(undefined, token);
+    setShowAirtableField(false);
+  };
 
-  // ---------- Export / Import CSV (fichier de sauvegarde local, indépendant du navigateur) ----------
+  // ---------- Airtable (base de données distante) ----------
+  const airtableFetch = async (path, options) => {
+    const res = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${AIRTABLE_TABLE_ID}${path || ''}`, {
+      ...(options || {}),
+      headers: { 'Authorization': `Bearer ${airtableToken}`, 'Content-Type': 'application/json', ...((options && options.headers) || {}) },
+    });
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json()).error?.message || ''; } catch (e) {}
+      throw new Error(`HTTP ${res.status}` + (detail ? ` — ${detail}` : ''));
+    }
+    return res.json();
+  };
+
+  const recordToBook = (rec) => {
+    const f = rec.fields || {};
+    const statusMatch = STATUS_OPTIONS.find((s) => s.label === f['Statut']);
+    return {
+      id: rec.id,
+      title: f['Titre'] || '',
+      author: f['Auteur'] || '',
+      pageCount: f['Pages'] || '',
+      isbn: (f['ISBN'] && f['ISBN'].text) || '',
+      status: statusMatch ? statusMatch.id : 'a_lire',
+      rating: f['Note'] || 0,
+      categories: f['Categories'] || [],
+      cover: (f['Couverture'] && f['Couverture'][0] && f['Couverture'][0].url) || null,
+      startDate: f['DebutLecture'] || '',
+      endDate: f['FinLecture'] || '',
+      pagesRead: f['PagesLues'] || '',
+    };
+  };
+
+  const bookToFields = (book) => {
+    const st = statusInfo(book.status);
+    return {
+      'Titre': book.title || '',
+      'Auteur': book.author || '',
+      'Pages': book.pageCount ? parseInt(book.pageCount, 10) : null,
+      'ISBN': book.isbn ? { text: String(book.isbn) } : null,
+      'Statut': st.label,
+      'Note': book.rating || null,
+      'Categories': book.categories && book.categories.length ? book.categories : [],
+      'Couverture': book.cover ? [{ url: book.cover }] : [],
+      'DebutLecture': book.startDate || null,
+      'FinLecture': book.endDate || null,
+      'PagesLues': book.pagesRead ? parseInt(book.pagesRead, 10) : null,
+    };
+  };
+
+  const refreshBooks = async () => {
+    let all = []; let offset;
+    do {
+      const qs = offset ? `?pageSize=100&offset=${encodeURIComponent(offset)}` : '?pageSize=100';
+      const data = await airtableFetch(qs);
+      all = all.concat(data.records);
+      offset = data.offset;
+    } while (offset);
+    const newBooks = all.map(recordToBook);
+    setBooks(newBooks);
+    const allCats = new Set(DEFAULT_CATEGORIES);
+    newBooks.forEach((b) => (b.categories || []).forEach((c) => allCats.add(c)));
+    setCategories(Array.from(allCats));
+    return newBooks;
+  };
+
+  useEffect(() => {
+    if (!airtableToken) return;
+    setSyncing(true); setSaveError('');
+    refreshBooks().catch((e) => setSaveError('Échec du chargement depuis Airtable : ' + (e && e.message ? e.message : String(e)))).finally(() => setSyncing(false));
+  }, [airtableToken]);
+
+  // Certains comptes Airtable bloquent les requêtes PATCH depuis un navigateur (bug CORS connu côté Airtable).
+  // En cas d'échec, on se rabat sur : suppression puis recréation de l'enregistrement.
+  const updateBookInAirtable = async (id, fields) => {
+    try {
+      await airtableFetch('', { method: 'PATCH', body: JSON.stringify({ records: [{ id, fields }], typecast: true }) });
+      return id;
+    } catch (e) {
+      await airtableFetch(`?records[]=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const created = await airtableFetch('', { method: 'POST', body: JSON.stringify({ records: [{ fields }], typecast: true }) });
+      return created.records[0].id;
+    }
+  };
+
+  const filteredBooks = useMemo(() => {
+    const q = normalize(searchQuery);
+    return books.filter((b) => {
+      if (q && !normalize(b.title).includes(q) && !normalize(b.author).includes(q)) return false;
+      if (statusFilter !== 'tous' && b.status !== statusFilter) return false;
+      if (categoryFilter.length > 0) {
+        const has = (b.categories || []).some((c) => categoryFilter.includes(c));
+        if (!has) return false;
+      }
+      return true;
+    }).sort((a, b) => a.title.localeCompare(b.title, 'fr'));
+  }, [books, searchQuery, statusFilter, categoryFilter]);
+
+  const luCount = useMemo(() => books.filter((b) => b.status === 'lu').length, [books]);
+  const activeFilterCount = (statusFilter !== 'tous' ? 1 : 0) + categoryFilter.length;
+
+  // ---------- Book CRUD (Airtable) ----------
+  const openNewBook = () => {
+    setForm(emptyBook()); setShowImport(false); setImportedNote(false);
+    setImportResults([]); setImportQuery(''); setView('form');
+  };
+  const openEditBook = (book) => {
+    setForm({ ...book, categories: [...(book.categories || [])] });
+    setShowImport(false); setImportedNote(false); setView('form');
+  };
+  const saveBook = async () => {
+    if (!form.title.trim() || !airtableToken) return;
+    setSyncing(true); setSaveError('');
+    try {
+      const fields = bookToFields(form);
+      if (form.id) {
+        await updateBookInAirtable(form.id, fields);
+      } else {
+        await airtableFetch('', { method: 'POST', body: JSON.stringify({ records: [{ fields }], typecast: true }) });
+      }
+      await refreshBooks();
+      setView('list');
+    } catch (e) {
+      setSaveError('Échec de la sauvegarde : ' + (e && e.message ? e.message : String(e)));
+    } finally { setSyncing(false); }
+  };
+  const deleteBook = async (id) => {
+    setSyncing(true); setSaveError('');
+    try {
+      await airtableFetch(`?records[]=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      await refreshBooks();
+      setView('list');
+    } catch (e) {
+      setSaveError('Échec de la suppression : ' + (e && e.message ? e.message : String(e)));
+    } finally { setSyncing(false); }
+  };
+  const toggleFormCategory = (cat) => {
+    setForm((f) => {
+      const has = f.categories.includes(cat);
+      return { ...f, categories: has ? f.categories.filter((c) => c !== cat) : [...f.categories, cat] };
+    });
+  };
+  const addNewCategory = () => {
+    const name = newCategoryInput.trim();
+    if (!name) return;
+    const match = categories.find((c) => normalize(c) === normalize(name));
+    const finalName = match || name;
+    if (!match) setCategories((cur) => [...cur, name]);
+    if (!form.categories.includes(finalName)) setForm((f) => ({ ...f, categories: [...f.categories, finalName] }));
+    setNewCategoryInput('');
+  };
+  const toggleFilterCategory = (cat) => {
+    setCategoryFilter((cur) => (cur.includes(cat) ? cur.filter((c) => c !== cat) : [...cur, cat]));
+  };
+
+  // ---------- Export CSV (copie locale de secours, en plus d'Airtable) ----------
   const CSV_HEADERS = ['Titre', 'Auteur', 'Pages', 'ISBN', 'Statut', 'Note', 'Categories', 'Couverture', 'DebutLecture', 'FinLecture', 'PagesLues'];
   const csvEscape = (field) => {
     const str = field === null || field === undefined ? '' : String(field);
     if (/[;"\n\r]/.test(str)) return '"' + str.replace(/"/g, '""') + '"';
     return str;
   };
-  const parseCSV = (text) => {
-    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    const rows = []; let row = []; let field = ''; let inQuotes = false;
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i];
-      if (inQuotes) {
-        if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; } }
-        else field += c;
-      } else {
-        if (c === '"') inQuotes = true;
-        else if (c === ';') { row.push(field); field = ''; }
-        else if (c === '\r') { /* ignoré, la fin de ligne est gérée par \n */ }
-        else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
-        else field += c;
-      }
-    }
-    if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
-    return rows.filter((r) => r.some((c) => c !== ''));
-  };
-
-  const fileInputRef = useRef(null);
   const exportData = () => {
     const rows = [CSV_HEADERS.map(csvEscape).join(';')];
     books.forEach((b) => {
@@ -380,113 +528,6 @@ function App() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  };
-  const triggerImport = () => { if (fileInputRef.current) fileInputRef.current.click(); };
-  const importData = (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const rows = parseCSV(String(reader.result));
-        if (rows.length < 1) throw new Error('Fichier vide.');
-        const header = rows[0].map((h) => h.trim());
-        const idx = (name) => header.indexOf(name);
-        const iTitre = idx('Titre'), iAuteur = idx('Auteur'), iPages = idx('Pages'), iIsbn = idx('ISBN'),
-          iStatut = idx('Statut'), iNote = idx('Note'), iCategories = idx('Categories'),
-          iCouverture = idx('Couverture'), iDebut = idx('DebutLecture'), iFin = idx('FinLecture'), iPagesLues = idx('PagesLues');
-        if (iTitre === -1) throw new Error('Colonne "Titre" introuvable — ce fichier vient-il bien d\'un export de cette app ?');
-        const newBooks = rows.slice(1).map((r) => {
-          const statutLabel = iStatut !== -1 ? (r[iStatut] || '') : '';
-          const statusMatch = STATUS_OPTIONS.find((s) => normalize(s.label) === normalize(statutLabel) || s.id === statutLabel);
-          const catRaw = iCategories !== -1 ? (r[iCategories] || '') : '';
-          return {
-            id: makeId(),
-            title: r[iTitre] || '',
-            author: iAuteur !== -1 ? (r[iAuteur] || '') : '',
-            pageCount: iPages !== -1 ? (r[iPages] || '') : '',
-            isbn: iIsbn !== -1 ? (r[iIsbn] || '') : '',
-            status: statusMatch ? statusMatch.id : 'a_lire',
-            rating: iNote !== -1 && r[iNote] ? (parseFloat(r[iNote]) || 0) : 0,
-            categories: catRaw ? catRaw.split(',').map((c) => c.trim()).filter(Boolean) : [],
-            cover: iCouverture !== -1 && r[iCouverture] ? r[iCouverture] : null,
-            startDate: iDebut !== -1 ? (r[iDebut] || '') : '',
-            endDate: iFin !== -1 ? (r[iFin] || '') : '',
-            pagesRead: iPagesLues !== -1 ? (r[iPagesLues] || '') : '',
-          };
-        }).filter((b) => b.title);
-        const ok = window.confirm(`Remplacer ta bibliothèque actuelle (${books.length} livre${books.length !== 1 ? 's' : ''}) par ce fichier (${newBooks.length} livre${newBooks.length !== 1 ? 's' : ''}) ?\n\nCette action est irréversible.`);
-        if (!ok) return;
-        const allCats = new Set(categories);
-        newBooks.forEach((b) => (b.categories || []).forEach((c) => allCats.add(c)));
-        const newCategories = Array.from(allCats);
-        setBooks(newBooks);
-        setCategories(newCategories);
-        persist(newBooks, newCategories);
-      } catch (err) {
-        alert('Impossible de lire ce fichier : ' + (err && err.message ? err.message : String(err)));
-      } finally {
-        e.target.value = '';
-      }
-    };
-    reader.readAsText(file, 'UTF-8');
-  };
-
-  const filteredBooks = useMemo(() => {
-    const q = normalize(searchQuery);
-    return books.filter((b) => {
-      if (q && !normalize(b.title).includes(q) && !normalize(b.author).includes(q)) return false;
-      if (statusFilter !== 'tous' && b.status !== statusFilter) return false;
-      if (categoryFilter.length > 0) {
-        const has = (b.categories || []).some((c) => categoryFilter.includes(c));
-        if (!has) return false;
-      }
-      return true;
-    }).sort((a, b) => a.title.localeCompare(b.title, 'fr'));
-  }, [books, searchQuery, statusFilter, categoryFilter]);
-
-  const luCount = useMemo(() => books.filter((b) => b.status === 'lu').length, [books]);
-  const activeFilterCount = (statusFilter !== 'tous' ? 1 : 0) + categoryFilter.length;
-
-  // ---------- Book CRUD ----------
-  const openNewBook = () => {
-    setForm(emptyBook()); setShowImport(false); setImportedNote(false);
-    setImportResults([]); setImportQuery(''); setView('form');
-  };
-  const openEditBook = (book) => {
-    setForm({ ...book, categories: [...(book.categories || [])] });
-    setShowImport(false); setImportedNote(false); setView('form');
-  };
-  const saveBook = () => {
-    if (!form.title.trim()) return;
-    let newBooks;
-    if (form.id) newBooks = books.map((b) => (b.id === form.id ? { ...form } : b));
-    else newBooks = [...books, { ...form, id: makeId() }];
-    setBooks(newBooks); persist(newBooks, categories); setView('list');
-  };
-  const deleteBook = (id) => {
-    const newBooks = books.filter((b) => b.id !== id);
-    setBooks(newBooks); persist(newBooks, categories); setView('list');
-  };
-  const toggleFormCategory = (cat) => {
-    setForm((f) => {
-      const has = f.categories.includes(cat);
-      return { ...f, categories: has ? f.categories.filter((c) => c !== cat) : [...f.categories, cat] };
-    });
-  };
-  const addNewCategory = () => {
-    const name = newCategoryInput.trim();
-    if (!name) return;
-    const match = categories.find((c) => normalize(c) === normalize(name));
-    const finalName = match || name;
-    const newCategories = match ? categories : [...categories, name];
-    if (!match) setCategories(newCategories);
-    if (!form.categories.includes(finalName)) setForm((f) => ({ ...f, categories: [...f.categories, finalName] }));
-    setNewCategoryInput('');
-    persist(books, newCategories);
-  };
-  const toggleFilterCategory = (cat) => {
-    setCategoryFilter((cur) => (cur.includes(cat) ? cur.filter((c) => c !== cat) : [...cur, cat]));
   };
 
   // ---------- Google Books import ----------
@@ -602,12 +643,42 @@ function App() {
     return <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: COLORS.paper }}><Icon.Loader size={28} color={COLORS.oxblood} /></div>;
   }
 
+  if (!airtableToken) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-4" style={{ backgroundColor: COLORS.paper }}>
+        <div className="max-w-sm w-full">
+          <div className="text-xs uppercase tracking-widest mb-1" style={{ color: COLORS.gold, letterSpacing: '0.15em' }}>Configuration requise</div>
+          <h1 className="font-serif text-2xl mb-3" style={{ color: COLORS.ink }}>Connecter Airtable</h1>
+          <p className="text-sm mb-3" style={{ color: COLORS.inkSoft }}>
+            Colle un jeton d'accès personnel Airtable (créé sur airtable.com/create/tokens), limité à la base « Ma Bibliothèque » avec les droits data.records:read et data.records:write.
+          </p>
+          <input
+            value={airtableTokenInput}
+            onChange={(e) => setAirtableTokenInput(e.target.value)}
+            placeholder="pat..."
+            className="w-full px-3 py-2 rounded-lg text-sm outline-none font-mono mb-2"
+            style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }}
+          />
+          <button
+            onClick={saveAirtableToken}
+            disabled={!airtableTokenInput.trim()}
+            className="w-full py-2.5 rounded-lg text-sm font-medium"
+            style={{ backgroundColor: airtableTokenInput.trim() ? COLORS.accent : COLORS.gray, color: COLORS.card }}
+          >
+            Connecter
+          </button>
+          {saveError && <div className="text-sm mt-3" style={{ color: COLORS.ink }}>{saveError}</div>}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen" style={{ backgroundColor: COLORS.paper }}>
       <div className="max-w-md mx-auto px-4 pb-24">
         {saveError && (
           <div className="flex items-center gap-2 text-sm px-3 py-2 mt-3 rounded" style={{ backgroundColor: COLORS.card, color: COLORS.ink }}>
-            <Icon.Alert size={16} /> La sauvegarde a échoué (stockage plein ou bloqué par le navigateur).
+            <Icon.Alert size={16} /> {saveError}
           </div>
         )}
 
@@ -616,13 +687,16 @@ function App() {
             <div className="pt-6 pb-3" style={{ borderBottom: `1px dashed ${COLORS.line}` }}>
               <div className="flex items-start justify-between">
                 <div>
-                  <div className="text-xs font-sans uppercase tracking-widest" style={{ color: COLORS.gold, letterSpacing: '0.15em' }}>Catalogue personnel</div>
+                  <div className="text-xs font-sans uppercase tracking-widest" style={{ color: COLORS.gold, letterSpacing: '0.15em' }}>Catalogue personnel · Airtable</div>
                   <h1 className="font-serif text-3xl mt-0.5" style={{ color: COLORS.ink }}>Bibliothèque</h1>
-                  <div className="text-sm mt-1" style={{ color: COLORS.inkSoft }}>{books.length} livre{books.length !== 1 ? 's' : ''} · {luCount} lu{luCount !== 1 ? 's' : ''}</div>
+                  <div className="text-sm mt-1 flex items-center gap-1.5" style={{ color: COLORS.inkSoft }}>
+                    {books.length} livre{books.length !== 1 ? 's' : ''} · {luCount} lu{luCount !== 1 ? 's' : ''}
+                    {syncing && <Icon.Loader size={12} color={COLORS.accent} />}
+                  </div>
                   <div className="flex gap-3 mt-1.5">
                     <button onClick={exportData} className="text-xs underline" style={{ color: COLORS.accent }}>Exporter (CSV)</button>
-                    <button onClick={triggerImport} className="text-xs underline" style={{ color: COLORS.accent }}>Importer (CSV)</button>
-                    <input ref={fileInputRef} type="file" accept=".csv,text/csv" onChange={importData} style={{ display: 'none' }} />
+                    <button onClick={() => refreshBooks().catch((e) => setSaveError('Échec du rafraîchissement : ' + (e && e.message ? e.message : String(e))))} className="text-xs underline" style={{ color: COLORS.accent }}>Rafraîchir</button>
+                    <button onClick={() => { setShowAirtableField(true); setView('settings'); }} className="text-xs underline" style={{ color: COLORS.inkSoft }}>Réglages</button>
                   </div>
                 </div>
                 <button onClick={openNewBook} className="rounded-full p-3 flex-shrink-0" style={{ backgroundColor: COLORS.oxblood, color: COLORS.card }} aria-label="Ajouter un livre"><Icon.Plus size={20} /></button>
@@ -696,6 +770,29 @@ function App() {
               })}
             </div>
           </React.Fragment>
+        )}
+
+        {view === 'settings' && (
+          <div className="pt-6">
+            <button onClick={() => setView('list')} className="flex items-center gap-1 text-sm mb-4" style={{ color: COLORS.inkSoft }}><Icon.ChevronLeft size={18} /> Retour</button>
+            <h2 className="font-serif text-2xl mb-4" style={{ color: COLORS.ink }}>Réglages</h2>
+
+            <div className="mb-5">
+              <label className="text-xs uppercase tracking-wide" style={{ color: COLORS.inkSoft }}>Jeton Airtable</label>
+              <div className="flex gap-2 mt-1.5">
+                <input value={airtableTokenInput} onChange={(e) => setAirtableTokenInput(e.target.value)} placeholder="pat..." className="flex-1 px-3 py-2 rounded-lg text-sm outline-none font-mono" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} />
+                <button onClick={saveAirtableToken} className="px-3 py-2 rounded-lg text-sm" style={{ backgroundColor: COLORS.accent, color: COLORS.card }}>Sauver</button>
+              </div>
+            </div>
+
+            <div className="mb-5">
+              <label className="text-xs uppercase tracking-wide" style={{ color: COLORS.inkSoft }}>Clé API Google Books (optionnelle)</label>
+              <div className="flex gap-2 mt-1.5">
+                <input value={apiKeyInput} onChange={(e) => setApiKeyInput(e.target.value)} placeholder="AIza..." className="flex-1 px-3 py-2 rounded-lg text-sm outline-none font-mono" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} />
+                <button onClick={saveApiKey} className="px-3 py-2 rounded-lg text-sm" style={{ backgroundColor: COLORS.paperDark, color: COLORS.ink }}>Sauver</button>
+              </div>
+            </div>
+          </div>
         )}
 
         {view === 'form' && (
@@ -859,7 +956,9 @@ function App() {
         <div className="fixed bottom-0 left-0 right-0 px-4 py-3" style={{ backgroundColor: COLORS.paper, borderTop: `1px solid ${COLORS.line}`, paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}>
           <div className="max-w-md mx-auto flex gap-2">
             <button onClick={() => setView('list')} className="flex-1 py-2.5 rounded-lg text-sm" style={{ backgroundColor: COLORS.paperDark, color: COLORS.ink }}>Annuler</button>
-            <button onClick={saveBook} disabled={!form.title.trim()} className="flex-1 py-2.5 rounded-lg text-sm font-medium" style={{ backgroundColor: form.title.trim() ? COLORS.oxblood : COLORS.gray, color: COLORS.card }}>Enregistrer</button>
+            <button onClick={saveBook} disabled={!form.title.trim() || syncing} className="flex-1 py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5" style={{ backgroundColor: form.title.trim() && !syncing ? COLORS.oxblood : COLORS.gray, color: COLORS.card }}>
+              {syncing && <Icon.Loader size={14} color={COLORS.card} />} Enregistrer
+            </button>
           </div>
         </div>
       )}
