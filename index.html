@@ -417,6 +417,30 @@ function App() {
     refreshBooks().catch((e) => setSaveError('Échec du chargement depuis Airtable : ' + (e && e.message ? e.message : String(e)))).finally(() => setSyncing(false));
   }, [airtableToken]);
 
+  const deleteAllBooks = async () => {
+    if (books.length === 0) { alert('Ta bibliothèque est déjà vide.'); return; }
+    const ok = window.confirm(
+      `Supprimer DÉFINITIVEMENT les ${books.length} livre${books.length !== 1 ? 's' : ''} de ta bibliothèque Airtable ?\n\n` +
+      `Cette action est IRRÉVERSIBLE — il n'y a aucun moyen de revenir en arrière.\n\n` +
+      `Astuce : utilise « Exporter (CSV) » avant si tu n'es pas certain.\n\n` +
+      `Confirmer la suppression complète ?`
+    );
+    if (!ok) return;
+    setSyncing(true); setSaveError('');
+    try {
+      const ids = books.map((b) => b.id);
+      for (let i = 0; i < ids.length; i += 10) {
+        const chunk = ids.slice(i, i + 10);
+        const qs = chunk.map((id) => `records[]=${encodeURIComponent(id)}`).join('&');
+        await airtableFetch(`?${qs}`, { method: 'DELETE' });
+      }
+      await refreshBooks();
+      setView('list');
+    } catch (e) {
+      setSaveError('Échec de la suppression complète : ' + (e && e.message ? e.message : String(e)));
+    } finally { setSyncing(false); }
+  };
+
   // Certains comptes Airtable bloquent les requêtes PATCH depuis un navigateur (bug CORS connu côté Airtable).
   // En cas d'échec, on se rabat sur : suppression puis recréation de l'enregistrement.
   const updateBookInAirtable = async (id, fields) => {
@@ -453,7 +477,11 @@ function App() {
   };
   const openEditBook = (book) => {
     setForm({ ...book, categories: [...(book.categories || [])] });
-    setShowImport(false); setImportedNote(false); setView('form');
+    setShowImport(false); setImportedNote(false);
+    setImportMode(book.isbn ? 'isbn' : 'titre');
+    setImportQuery(book.isbn || book.title || '');
+    setImportResults([]); setImportError('');
+    setView('form');
   };
   const saveBook = async () => {
     if (!form.title.trim() || !airtableToken) return;
@@ -867,6 +895,19 @@ function App() {
                 <button onClick={saveApiKey} className="px-3 py-2 rounded-lg text-sm" style={{ backgroundColor: COLORS.paperDark, color: COLORS.ink }}>Sauver</button>
               </div>
             </div>
+
+            <div className="mt-8 pt-4" style={{ borderTop: `1px solid ${COLORS.line}` }}>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <Icon.Alert size={14} color={COLORS.ink} />
+                <span className="text-xs uppercase tracking-wide font-medium" style={{ color: COLORS.ink }}>Zone dangereuse</span>
+              </div>
+              <p className="text-xs mb-2" style={{ color: COLORS.inkSoft }}>
+                Supprime définitivement tous les livres de la base Airtable. Irréversible.
+              </p>
+              <button onClick={deleteAllBooks} disabled={syncing} className="w-full py-2.5 rounded-lg text-sm font-medium" style={{ backgroundColor: COLORS.ink, color: COLORS.paper }}>
+                Effacer toute la bibliothèque ({books.length})
+              </button>
+            </div>
           </div>
         )}
 
@@ -879,14 +920,19 @@ function App() {
 
             <h2 className="font-serif text-2xl mb-4" style={{ color: COLORS.ink }}>{form.id ? 'Modifier le livre' : 'Ajouter un livre'}</h2>
 
-            {!form.id && (
+            {(
               <div className="mb-5 rounded-lg overflow-hidden" style={{ border: `1px solid ${COLORS.line}` }}>
                 <button onClick={() => setShowImport((s) => !s)} className="w-full flex items-center justify-between px-3 py-2.5" style={{ backgroundColor: COLORS.card }}>
-                  <span className="text-sm font-medium" style={{ color: COLORS.slate }}>Importer depuis Google Books</span>
+                  <span className="text-sm font-medium" style={{ color: COLORS.slate }}>{form.id ? 'Mettre à jour depuis Google Books' : 'Importer depuis Google Books'}</span>
                   <Icon.ChevronDown size={16} color={COLORS.inkSoft} />
                 </button>
                 {showImport && (
                   <div className="p-3" style={{ backgroundColor: COLORS.paper }}>
+                    {form.id && (
+                      <div className="text-xs mb-2" style={{ color: COLORS.inkSoft }}>
+                        Chercher puis choisir un résultat remplacera titre, auteur, pages, ISBN et couverture par ceux de Google Books.
+                      </div>
+                    )}
                     <div className="flex gap-1.5 mb-2">
                       {[{ id: 'titre', label: 'Titre' }, { id: 'auteur', label: 'Auteur' }, { id: 'isbn', label: 'ISBN' }].map((m) => (
                         <Pill key={m.id} active={importMode === m.id} color={COLORS.slate} onClick={() => setImportMode(m.id)}>{m.label}</Pill>
