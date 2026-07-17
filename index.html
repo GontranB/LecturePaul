@@ -155,7 +155,7 @@ function hexToRgba(hex, alpha) {
 function normalize(s) { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
 function makeId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 function emptyBook() {
-  return { id: null, title: '', author: '', pageCount: '', isbn: '', status: 'a_lire', rating: 0, categories: [], cover: null, startDate: '', endDate: '', pagesRead: '' };
+  return { id: null, title: '', author: '', pageCount: '', isbn: '', status: 'a_lire', rating: 0, categories: [], cover: null, startDate: '', endDate: '', pagesRead: '', comment: '' };
 }
 function progressPercent(book) {
   if (book.status === 'lu') return 100;
@@ -273,6 +273,29 @@ function Pill({ active, color, onClick, children }) {
   );
 }
 
+function StatCard({ label, value, sub }) {
+  return (
+    <div className="p-3 rounded-lg" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}` }}>
+      <div className="text-xs uppercase tracking-wide" style={{ color: COLORS.inkSoft }}>{label}</div>
+      <div className="font-serif text-2xl mt-0.5" style={{ color: COLORS.ink }}>{value}</div>
+      {sub && <div className="text-xs mt-0.5" style={{ color: COLORS.inkSoft }}>{sub}</div>}
+    </div>
+  );
+}
+
+function BarRow({ label, value, max, color, suffix }) {
+  const pct = max > 0 ? Math.max(2, (value / max) * 100) : 0;
+  return (
+    <div className="flex items-center gap-2">
+      <div className="text-xs w-24 truncate flex-shrink-0" style={{ color: COLORS.inkSoft }} title={label}>{label}</div>
+      <div className="flex-1 rounded-full overflow-hidden" style={{ height: 10, backgroundColor: COLORS.paperDark }}>
+        <div style={{ height: 10, width: `${pct}%`, backgroundColor: color || COLORS.accent, borderRadius: 9999 }} />
+      </div>
+      <div className="text-xs w-8 text-right flex-shrink-0 tabular-nums" style={{ color: COLORS.ink }}>{value}{suffix || ''}</div>
+    </div>
+  );
+}
+
 function App() {
   const [books, setBooks] = useState([]);
   const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
@@ -376,6 +399,7 @@ function App() {
       startDate: f['DebutLecture'] || '',
       endDate: f['FinLecture'] || '',
       pagesRead: f['PagesLues'] || '',
+      comment: f['Commentaire'] || '',
     };
   };
 
@@ -393,6 +417,7 @@ function App() {
       'DebutLecture': book.startDate || null,
       'FinLecture': book.endDate || null,
       'PagesLues': book.pagesRead ? parseInt(book.pagesRead, 10) : null,
+      'Commentaire': book.comment || null,
     };
   };
 
@@ -471,6 +496,33 @@ function App() {
   const luCount = useMemo(() => books.filter((b) => b.status === 'lu').length, [books]);
   const activeFilterCount = (statusFilter !== 'tous' ? 1 : 0) + categoryFilter.length;
 
+  const stats = useMemo(() => {
+    const luBooks = books.filter((b) => b.status === 'lu');
+    const totalPages = luBooks.reduce((sum, b) => sum + (parseInt(b.pageCount, 10) || 0), 0);
+    const ratedBooks = books.filter((b) => b.rating > 0);
+    const avgRating = ratedBooks.length ? ratedBooks.reduce((s, b) => s + b.rating, 0) / ratedBooks.length : null;
+
+    const byYear = {};
+    luBooks.forEach((b) => {
+      const d = b.endDate || b.startDate;
+      if (!d) return;
+      const year = d.slice(0, 4);
+      byYear[year] = (byYear[year] || 0) + 1;
+    });
+    const byYearData = Object.keys(byYear).sort().map((y) => ({ label: y, value: byYear[y] }));
+
+    const byCategory = {};
+    books.forEach((b) => (b.categories || []).forEach((c) => { byCategory[c] = (byCategory[c] || 0) + 1; }));
+    const byCategoryData = Object.entries(byCategory).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value }));
+
+    const byStatusData = STATUS_OPTIONS.map((s) => ({ label: s.label, value: books.filter((b) => b.status === s.id).length, color: s.color }));
+
+    const topRated = books.filter((b) => b.rating > 0).sort((a, b) => b.rating - a.rating).slice(0, 5);
+    const avgPagesPerBook = luBooks.length ? Math.round(totalPages / luBooks.length) : null;
+
+    return { totalBooks: books.length, totalLu: luBooks.length, totalPages, avgRating, avgPagesPerBook, byYearData, byCategoryData, byStatusData, topRated };
+  }, [books]);
+
   // ---------- Book CRUD (Airtable) ----------
   const openNewBook = () => {
     setForm(emptyBook()); setShowImport(false); setImportedNote(false);
@@ -530,7 +582,7 @@ function App() {
   };
 
   // ---------- Export CSV (copie locale de secours, en plus d'Airtable) ----------
-  const CSV_HEADERS = ['Titre', 'Auteur', 'Pages', 'ISBN', 'Statut', 'Note', 'Categories', 'Couverture', 'DebutLecture', 'FinLecture', 'PagesLues'];
+  const CSV_HEADERS = ['Titre', 'Auteur', 'Pages', 'ISBN', 'Statut', 'Note', 'Categories', 'Couverture', 'DebutLecture', 'FinLecture', 'PagesLues', 'Commentaire'];
   const csvEscape = (field) => {
     const str = field === null || field === undefined ? '' : String(field);
     if (/[;"\n\r]/.test(str)) return '"' + str.replace(/"/g, '""') + '"';
@@ -544,6 +596,7 @@ function App() {
         csvEscape(b.title), csvEscape(b.author), csvEscape(b.pageCount), csvEscape(b.isbn),
         csvEscape(st.label), csvEscape(b.rating || ''), csvEscape((b.categories || []).join(', ')),
         csvEscape(b.cover || ''), csvEscape(b.startDate || ''), csvEscape(b.endDate || ''), csvEscape(b.pagesRead || ''),
+        csvEscape(b.comment || ''),
       ].join(';'));
     });
     const csv = '\uFEFF' + rows.join('\r\n');
@@ -593,7 +646,8 @@ function App() {
         const idx = (name) => header.indexOf(name);
         const iTitre = idx('Titre'), iAuteur = idx('Auteur'), iPages = idx('Pages'), iIsbn = idx('ISBN'),
           iStatut = idx('Statut'), iNote = idx('Note'), iCategories = idx('Categories'),
-          iCouverture = idx('Couverture'), iDebut = idx('DebutLecture'), iFin = idx('FinLecture'), iPagesLues = idx('PagesLues');
+          iCouverture = idx('Couverture'), iDebut = idx('DebutLecture'), iFin = idx('FinLecture'), iPagesLues = idx('PagesLues'),
+          iCommentaire = idx('Commentaire');
         if (iTitre === -1) throw new Error('Colonne "Titre" introuvable — ce fichier vient-il bien d\'un export de cette app ?');
         const newBooks = rows.slice(1).map((r) => {
           const statutLabel = iStatut !== -1 ? (r[iStatut] || '') : '';
@@ -611,6 +665,7 @@ function App() {
             startDate: iDebut !== -1 ? (r[iDebut] || '') : '',
             endDate: iFin !== -1 ? (r[iFin] || '') : '',
             pagesRead: iPagesLues !== -1 ? (r[iPagesLues] || '') : '',
+            comment: iCommentaire !== -1 ? (r[iCommentaire] || '') : '',
           };
         }).filter((b) => b.title);
         if (newBooks.length === 0) throw new Error('Aucun livre valide (avec un titre) trouvé dans ce fichier.');
@@ -793,7 +848,7 @@ function App() {
           </div>
         )}
 
-        {view === 'list' && (
+        {(view === 'list' || view === 'stats') && (
           <React.Fragment>
             <div className="pt-6 pb-3" style={{ borderBottom: `1px dashed ${COLORS.line}` }}>
               <div className="flex items-start justify-between">
@@ -816,6 +871,19 @@ function App() {
               </div>
             </div>
 
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => setView('list')} className="flex-1 py-2 rounded-lg text-sm font-medium"
+                style={{ backgroundColor: view === 'list' ? COLORS.ink : COLORS.card, color: view === 'list' ? COLORS.paper : COLORS.inkSoft, border: `1px solid ${view === 'list' ? COLORS.ink : COLORS.line}` }}>
+                Bibliothèque
+              </button>
+              <button onClick={() => setView('stats')} className="flex-1 py-2 rounded-lg text-sm font-medium"
+                style={{ backgroundColor: view === 'stats' ? COLORS.ink : COLORS.card, color: view === 'stats' ? COLORS.paper : COLORS.inkSoft, border: `1px solid ${view === 'stats' ? COLORS.ink : COLORS.line}` }}>
+                Statistiques
+              </button>
+            </div>
+
+            {view === 'list' && (
+              <React.Fragment>
             <div className="flex gap-2 mt-4">
               <div className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}` }}>
                 <Icon.Search size={16} color={COLORS.inkSoft} />
@@ -882,6 +950,70 @@ function App() {
                 );
               })}
             </div>
+              </React.Fragment>
+            )}
+
+            {view === 'stats' && (
+              <div className="mt-4 flex flex-col gap-5 pb-4">
+                <div className="grid grid-cols-2 gap-2">
+                  <StatCard label="Livres lus" value={stats.totalLu} sub={`sur ${stats.totalBooks} au catalogue`} />
+                  <StatCard label="Pages lues" value={stats.totalPages.toLocaleString('fr-CA')} sub={stats.avgPagesPerBook ? `≈ ${stats.avgPagesPerBook} p. / livre` : null} />
+                  <StatCard label="Note moyenne" value={stats.avgRating !== null ? stats.avgRating.toFixed(1) : '—'} sub={stats.avgRating !== null ? 'sur 5' : 'aucune note'} />
+                  <StatCard label="En cours" value={books.filter((b) => b.status === 'en_cours').length} />
+                </div>
+
+                {stats.byYearData.length > 0 && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wide mb-2" style={{ color: COLORS.inkSoft }}>Livres lus par année</div>
+                    <div className="flex flex-col gap-1.5">
+                      {stats.byYearData.map((d) => (
+                        <BarRow key={d.label} label={d.label} value={d.value} max={Math.max(...stats.byYearData.map((x) => x.value))} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {stats.byCategoryData.length > 0 && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wide mb-2" style={{ color: COLORS.inkSoft }}>Par catégorie</div>
+                    <div className="flex flex-col gap-1.5">
+                      {stats.byCategoryData.map((d) => (
+                        <BarRow key={d.label} label={d.label} value={d.value} max={Math.max(...stats.byCategoryData.map((x) => x.value))} color={COLORS.forest} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <div className="text-xs uppercase tracking-wide mb-2" style={{ color: COLORS.inkSoft }}>Par statut</div>
+                  <div className="flex flex-col gap-1.5">
+                    {stats.byStatusData.map((d) => (
+                      <BarRow key={d.label} label={d.label} value={d.value} max={Math.max(...stats.byStatusData.map((x) => x.value), 1)} color={d.color} />
+                    ))}
+                  </div>
+                </div>
+
+                {stats.topRated.length > 0 && (
+                  <div>
+                    <div className="text-xs uppercase tracking-wide mb-2" style={{ color: COLORS.inkSoft }}>Mieux notés</div>
+                    <div className="flex flex-col gap-1.5">
+                      {stats.topRated.map((b) => (
+                        <div key={b.id} className="flex items-center justify-between text-sm gap-2">
+                          <span className="truncate" style={{ color: COLORS.ink }}>{b.title}</span>
+                          <span className="flex-shrink-0" style={{ color: COLORS.accent }}>{b.rating.toFixed(1)} ★</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {books.length === 0 && (
+                  <div className="text-center py-16">
+                    <div className="text-sm" style={{ color: COLORS.inkSoft }}>Ajoute des livres pour voir apparaître tes statistiques.</div>
+                  </div>
+                )}
+              </div>
+            )}
           </React.Fragment>
         )}
 
@@ -1077,6 +1209,18 @@ function App() {
                   <input value={newCategoryInput} onChange={(e) => setNewCategoryInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addNewCategory()} placeholder="Nouvelle catégorie" className="flex-1 px-3 py-2 rounded-lg text-sm outline-none" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} />
                   <button onClick={addNewCategory} className="px-3 py-2 rounded-lg text-sm" style={{ backgroundColor: COLORS.paperDark, color: COLORS.ink }}>Ajouter</button>
                 </div>
+              </div>
+
+              <div>
+                <label className="text-xs uppercase tracking-wide" style={{ color: COLORS.inkSoft }}>Commentaire</label>
+                <textarea
+                  value={form.comment || ''}
+                  onChange={(e) => setForm((f) => ({ ...f, comment: e.target.value }))}
+                  placeholder="Tes impressions, citations à retenir, pour qui le recommander..."
+                  rows={4}
+                  className="w-full px-3 py-2 rounded-lg text-sm outline-none mt-1.5"
+                  style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink, resize: 'vertical', fontFamily: 'inherit' }}
+                />
               </div>
             </div>
           </div>
