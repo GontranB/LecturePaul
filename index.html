@@ -158,6 +158,7 @@ function emptyBook() {
   return { id: null, title: '', author: '', pageCount: '', isbn: '', status: 'a_lire', rating: 0, categories: [], cover: null, startDate: '', endDate: '', pagesRead: '' };
 }
 function progressPercent(book) {
+  if (book.status === 'lu') return 100;
   const total = parseInt(book.pageCount, 10);
   const read = parseInt(book.pagesRead, 10);
   if (!total || !read) return null;
@@ -632,6 +633,19 @@ function App() {
   };
 
   // ---------- Google Books import ----------
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const fetchGoogleBooks = async (url) => {
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await sleep(800 * attempt);
+      const res = await fetch(url);
+      if (res.ok) return res.json();
+      lastErr = new Error('HTTP ' + res.status + (res.status === 429 ? ' (quota dépassé — ajoute une clé API dans Réglages)' : res.status === 503 ? ' (service Google temporairement indisponible)' : ''));
+      if (res.status !== 503) throw lastErr; // on ne retente qu'en cas de 503 (indisponibilité temporaire)
+    }
+    throw lastErr;
+  };
+
   const runImportSearch = async (overrideQuery, overrideMode) => {
     const raw = (overrideQuery !== undefined ? overrideQuery : importQuery).trim();
     const mode = overrideMode || importMode;
@@ -643,9 +657,7 @@ function App() {
       else if (mode === 'titre') q = `intitle:${raw}`;
       else if (mode === 'auteur') q = `inauthor:${raw}`;
       const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=20` + (apiKey ? `&key=${encodeURIComponent(apiKey)}` : '');
-      const res = await fetch(url);
-      if (!res.ok) throw new Error('HTTP ' + res.status + (res.status === 429 ? ' (quota dépassé — ajoute une clé API ci-dessous)' : ''));
-      const data = await res.json();
+      const data = await fetchGoogleBooks(url);
       const items = (data.items || []).map((item) => {
         const info = item.volumeInfo || {};
         const ids = info.industryIdentifiers || [];
@@ -670,9 +682,7 @@ function App() {
   const lookupIsbnSilently = async (isbn) => {
     try {
       const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent('isbn:' + isbn)}&maxResults=1` + (apiKey ? `&key=${encodeURIComponent(apiKey)}` : '');
-      const res = await fetch(url);
-      if (!res.ok) return;
-      const data = await res.json();
+      const data = await fetchGoogleBooks(url);
       const item = (data.items || [])[0];
       if (!item) return;
       const info = item.volumeInfo || {};
