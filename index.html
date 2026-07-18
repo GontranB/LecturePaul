@@ -1000,7 +1000,7 @@ function App() {
             )}
 
             {view === 'stats' && (
-              <div className="mt-4 rounded-2xl p-3 pb-5" style={{ backgroundColor: '#EDEDED' }}>
+              <div className="mt-4 p-3 pb-5" style={{ backgroundColor: '#EDEDED' }}>
                 {dashboardActiveCount > 0 && (
                   <button onClick={clearDashboardFilters} className="text-xs underline mb-3" style={{ color: COLORS.accent }}>
                     Filtré{dashboardActiveCount > 1 ? 's' : ''} sur {[dashboardYear, dashboardCategory, dashboardStatus && statusInfo(dashboardStatus).label].filter(Boolean).join(' · ')} — réinitialiser
