@@ -275,24 +275,25 @@ function Pill({ active, color, onClick, children }) {
 
 function StatCard({ label, value, sub }) {
   return (
-    <div className="p-3 rounded-lg" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}` }}>
-      <div className="text-xs uppercase tracking-wide" style={{ color: COLORS.inkSoft }}>{label}</div>
-      <div className="font-serif text-2xl mt-0.5" style={{ color: COLORS.ink }}>{value}</div>
-      {sub && <div className="text-xs mt-0.5" style={{ color: COLORS.inkSoft }}>{sub}</div>}
+    <div className="p-4 rounded-2xl" style={{ backgroundColor: '#FFFFFF', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
+      <div className="text-xs uppercase tracking-wide font-medium" style={{ color: COLORS.inkSoft }}>{label}</div>
+      <div className="font-serif text-3xl mt-1" style={{ color: COLORS.ink }}>{value}</div>
+      {sub && <div className="text-xs mt-1" style={{ color: COLORS.inkSoft }}>{sub}</div>}
     </div>
   );
 }
 
-function BarRow({ label, value, max, color, suffix }) {
+function BarRow({ label, value, max, color, suffix, onClick, active, dimmed }) {
   const pct = max > 0 ? Math.max(2, (value / max) * 100) : 0;
+  const Wrapper = onClick ? 'button' : 'div';
   return (
-    <div className="flex items-center gap-2">
-      <div className="text-xs w-24 truncate flex-shrink-0" style={{ color: COLORS.inkSoft }} title={label}>{label}</div>
+    <Wrapper onClick={onClick} className="flex items-center gap-2 w-full text-left" style={{ opacity: dimmed ? 0.4 : 1, transition: 'opacity 0.15s' }}>
+      <div className="text-xs w-24 truncate flex-shrink-0" style={{ color: active ? COLORS.ink : COLORS.inkSoft, fontWeight: active ? 700 : 400 }} title={label}>{label}</div>
       <div className="flex-1 rounded-full overflow-hidden" style={{ height: 10, backgroundColor: COLORS.paperDark }}>
         <div style={{ height: 10, width: `${pct}%`, backgroundColor: color || COLORS.accent, borderRadius: 9999 }} />
       </div>
       <div className="text-xs w-8 text-right flex-shrink-0 tabular-nums" style={{ color: COLORS.ink }}>{value}{suffix || ''}</div>
-    </div>
+    </Wrapper>
   );
 }
 
@@ -311,6 +312,8 @@ function App() {
   const [showFilters, setShowFilters] = useState(false);
   const [statusFilter, setStatusFilter] = useState('tous');
   const [categoryFilter, setCategoryFilter] = useState([]);
+  const [ratingFilter, setRatingFilter] = useState(0);
+  const [yearFilter, setYearFilter] = useState([]);
 
   const [showImport, setShowImport] = useState(false);
   const [importMode, setImportMode] = useState('titre');
@@ -480,6 +483,8 @@ function App() {
     }
   };
 
+  const bookYear = (b) => { const d = b.endDate || b.startDate; return d ? d.slice(0, 4) : null; };
+
   const filteredBooks = useMemo(() => {
     const q = normalize(searchQuery);
     return books.filter((b) => {
@@ -489,39 +494,68 @@ function App() {
         const has = (b.categories || []).some((c) => categoryFilter.includes(c));
         if (!has) return false;
       }
+      if (ratingFilter > 0 && (b.rating || 0) < ratingFilter) return false;
+      if (yearFilter.length > 0 && !yearFilter.includes(bookYear(b))) return false;
       return true;
     }).sort((a, b) => a.title.localeCompare(b.title, 'fr'));
-  }, [books, searchQuery, statusFilter, categoryFilter]);
+  }, [books, searchQuery, statusFilter, categoryFilter, ratingFilter, yearFilter]);
 
   const luCount = useMemo(() => books.filter((b) => b.status === 'lu').length, [books]);
-  const activeFilterCount = (statusFilter !== 'tous' ? 1 : 0) + categoryFilter.length;
+  const activeFilterCount = (statusFilter !== 'tous' ? 1 : 0) + categoryFilter.length + (ratingFilter > 0 ? 1 : 0) + yearFilter.length;
+  const allYears = useMemo(() => {
+    const s = new Set();
+    books.forEach((b) => { const y = bookYear(b); if (y) s.add(y); });
+    return Array.from(s).sort().reverse();
+  }, [books]);
+
+  const [dashboardYear, setDashboardYear] = useState(null);
+  const [dashboardCategory, setDashboardCategory] = useState(null);
+  const [dashboardStatus, setDashboardStatus] = useState(null);
+
+  const dashboardFilteredBooks = useMemo(() => {
+    return books.filter((b) => {
+      if (dashboardYear && bookYear(b) !== dashboardYear) return false;
+      if (dashboardCategory && !(b.categories || []).includes(dashboardCategory)) return false;
+      if (dashboardStatus && b.status !== dashboardStatus) return false;
+      return true;
+    });
+  }, [books, dashboardYear, dashboardCategory, dashboardStatus]);
+
+  const dashboardActiveCount = (dashboardYear ? 1 : 0) + (dashboardCategory ? 1 : 0) + (dashboardStatus ? 1 : 0);
+  const clearDashboardFilters = () => { setDashboardYear(null); setDashboardCategory(null); setDashboardStatus(null); };
+  const toggleDashboardYear = (y) => setDashboardYear((cur) => (cur === y ? null : y));
+  const toggleDashboardCategory = (c) => setDashboardCategory((cur) => (cur === c ? null : c));
+  const toggleDashboardStatus = (s) => setDashboardStatus((cur) => (cur === s ? null : s));
+
+  // Ordre stable des axes (années / catégories), calculé sur l'ensemble complet des livres
+  // pour que les graphiques ne se réordonnent pas visuellement quand on clique un filtre.
+  const yearAxis = useMemo(() => {
+    const s = new Set();
+    books.forEach((b) => { if (b.status === 'lu') { const y = bookYear(b); if (y) s.add(y); } });
+    return Array.from(s).sort();
+  }, [books]);
+  const categoryAxis = useMemo(() => {
+    const counts = {};
+    books.forEach((b) => (b.categories || []).forEach((c) => { counts[c] = (counts[c] || 0) + 1; }));
+    return Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+  }, [books]);
 
   const stats = useMemo(() => {
-    const luBooks = books.filter((b) => b.status === 'lu');
+    const source = dashboardFilteredBooks;
+    const luBooks = source.filter((b) => b.status === 'lu');
     const totalPages = luBooks.reduce((sum, b) => sum + (parseInt(b.pageCount, 10) || 0), 0);
-    const ratedBooks = books.filter((b) => b.rating > 0);
+    const ratedBooks = source.filter((b) => b.rating > 0);
     const avgRating = ratedBooks.length ? ratedBooks.reduce((s, b) => s + b.rating, 0) / ratedBooks.length : null;
 
-    const byYear = {};
-    luBooks.forEach((b) => {
-      const d = b.endDate || b.startDate;
-      if (!d) return;
-      const year = d.slice(0, 4);
-      byYear[year] = (byYear[year] || 0) + 1;
-    });
-    const byYearData = Object.keys(byYear).sort().map((y) => ({ label: y, value: byYear[y] }));
+    const byYearData = yearAxis.map((y) => ({ label: y, value: source.filter((b) => b.status === 'lu' && bookYear(b) === y).length }));
+    const byCategoryData = categoryAxis.map((c) => ({ label: c, value: source.filter((b) => (b.categories || []).includes(c)).length }));
+    const byStatusData = STATUS_OPTIONS.map((s) => ({ label: s.label, id: s.id, value: source.filter((b) => b.status === s.id).length, color: s.color }));
 
-    const byCategory = {};
-    books.forEach((b) => (b.categories || []).forEach((c) => { byCategory[c] = (byCategory[c] || 0) + 1; }));
-    const byCategoryData = Object.entries(byCategory).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value }));
-
-    const byStatusData = STATUS_OPTIONS.map((s) => ({ label: s.label, value: books.filter((b) => b.status === s.id).length, color: s.color }));
-
-    const topRated = books.filter((b) => b.rating > 0).sort((a, b) => b.rating - a.rating).slice(0, 5);
+    const topRated = source.filter((b) => b.rating > 0).sort((a, b) => b.rating - a.rating).slice(0, 5);
     const avgPagesPerBook = luBooks.length ? Math.round(totalPages / luBooks.length) : null;
 
-    return { totalBooks: books.length, totalLu: luBooks.length, totalPages, avgRating, avgPagesPerBook, byYearData, byCategoryData, byStatusData, topRated };
-  }, [books]);
+    return { totalBooks: source.length, totalLu: luBooks.length, totalPages, avgRating, avgPagesPerBook, byYearData, byCategoryData, byStatusData, topRated };
+  }, [dashboardFilteredBooks, yearAxis, categoryAxis]);
 
   // ---------- Book CRUD (Airtable) ----------
   const openNewBook = () => {
@@ -904,11 +938,23 @@ function App() {
                   {STATUS_OPTIONS.map((s) => <Pill key={s.id} active={statusFilter === s.id} color={s.color} onClick={() => setStatusFilter(s.id)}>{s.label}</Pill>)}
                 </div>
                 <div className="text-xs uppercase tracking-wide mb-2" style={{ color: COLORS.inkSoft }}>Catégories</div>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap gap-2 mb-3">
                   {categories.map((c) => <Pill key={c} active={categoryFilter.includes(c)} color={COLORS.forest} onClick={() => toggleFilterCategory(c)}>{c}</Pill>)}
                 </div>
+                <div className="text-xs uppercase tracking-wide mb-2" style={{ color: COLORS.inkSoft }}>Note minimum</div>
+                <div className="mb-3">
+                  <StarRating value={ratingFilter} onChange={(v) => setRatingFilter(v)} size={20} />
+                </div>
+                {allYears.length > 0 && (
+                  <React.Fragment>
+                    <div className="text-xs uppercase tracking-wide mb-2" style={{ color: COLORS.inkSoft }}>Année</div>
+                    <div className="flex flex-wrap gap-2">
+                      {allYears.map((y) => <Pill key={y} active={yearFilter.includes(y)} color={COLORS.accent} onClick={() => setYearFilter((cur) => cur.includes(y) ? cur.filter((x) => x !== y) : [...cur, y])}>{y}</Pill>)}
+                    </div>
+                  </React.Fragment>
+                )}
                 {activeFilterCount > 0 && (
-                  <button onClick={() => { setStatusFilter('tous'); setCategoryFilter([]); }} className="text-xs underline mt-3" style={{ color: COLORS.oxblood }}>Réinitialiser les filtres</button>
+                  <button onClick={() => { setStatusFilter('tous'); setCategoryFilter([]); setRatingFilter(0); setYearFilter([]); }} className="text-xs underline mt-3" style={{ color: COLORS.oxblood }}>Réinitialiser les filtres</button>
                 )}
               </div>
             )}
@@ -954,49 +1000,58 @@ function App() {
             )}
 
             {view === 'stats' && (
-              <div className="mt-4 flex flex-col gap-5 pb-4">
-                <div className="grid grid-cols-2 gap-2">
+              <div className="mt-4 rounded-2xl p-3 pb-5" style={{ backgroundColor: '#EDEDED' }}>
+                {dashboardActiveCount > 0 && (
+                  <button onClick={clearDashboardFilters} className="text-xs underline mb-3" style={{ color: COLORS.accent }}>
+                    Filtré{dashboardActiveCount > 1 ? 's' : ''} sur {[dashboardYear, dashboardCategory, dashboardStatus && statusInfo(dashboardStatus).label].filter(Boolean).join(' · ')} — réinitialiser
+                  </button>
+                )}
+
+                <div className="grid grid-cols-2 gap-4">
                   <StatCard label="Livres lus" value={stats.totalLu} sub={`sur ${stats.totalBooks} au catalogue`} />
                   <StatCard label="Pages lues" value={stats.totalPages.toLocaleString('fr-CA')} sub={stats.avgPagesPerBook ? `≈ ${stats.avgPagesPerBook} p. / livre` : null} />
                   <StatCard label="Note moyenne" value={stats.avgRating !== null ? stats.avgRating.toFixed(1) : '—'} sub={stats.avgRating !== null ? 'sur 5' : 'aucune note'} />
-                  <StatCard label="En cours" value={books.filter((b) => b.status === 'en_cours').length} />
+                  <StatCard label="En cours" value={dashboardFilteredBooks.filter((b) => b.status === 'en_cours').length} />
                 </div>
 
                 {stats.byYearData.length > 0 && (
-                  <div>
-                    <div className="text-xs uppercase tracking-wide mb-2" style={{ color: COLORS.inkSoft }}>Livres lus par année</div>
-                    <div className="flex flex-col gap-1.5">
+                  <div className="mt-6 p-4 rounded-2xl" style={{ backgroundColor: '#FFFFFF', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
+                    <div className="text-xl font-bold mb-4" style={{ color: COLORS.ink }}>Livres lus par année</div>
+                    <div className="flex flex-col gap-2">
                       {stats.byYearData.map((d) => (
-                        <BarRow key={d.label} label={d.label} value={d.value} max={Math.max(...stats.byYearData.map((x) => x.value))} />
+                        <BarRow key={d.label} label={d.label} value={d.value} max={Math.max(...stats.byYearData.map((x) => x.value), 1)}
+                          onClick={() => toggleDashboardYear(d.label)} active={dashboardYear === d.label} dimmed={dashboardYear !== null && dashboardYear !== d.label} />
                       ))}
                     </div>
                   </div>
                 )}
 
                 {stats.byCategoryData.length > 0 && (
-                  <div>
-                    <div className="text-xs uppercase tracking-wide mb-2" style={{ color: COLORS.inkSoft }}>Par catégorie</div>
-                    <div className="flex flex-col gap-1.5">
+                  <div className="mt-6 p-4 rounded-2xl" style={{ backgroundColor: '#FFFFFF', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
+                    <div className="text-xl font-bold mb-4" style={{ color: COLORS.ink }}>Par catégorie</div>
+                    <div className="flex flex-col gap-2">
                       {stats.byCategoryData.map((d) => (
-                        <BarRow key={d.label} label={d.label} value={d.value} max={Math.max(...stats.byCategoryData.map((x) => x.value))} color={COLORS.forest} />
+                        <BarRow key={d.label} label={d.label} value={d.value} max={Math.max(...stats.byCategoryData.map((x) => x.value), 1)} color={COLORS.forest}
+                          onClick={() => toggleDashboardCategory(d.label)} active={dashboardCategory === d.label} dimmed={dashboardCategory !== null && dashboardCategory !== d.label} />
                       ))}
                     </div>
                   </div>
                 )}
 
-                <div>
-                  <div className="text-xs uppercase tracking-wide mb-2" style={{ color: COLORS.inkSoft }}>Par statut</div>
-                  <div className="flex flex-col gap-1.5">
+                <div className="mt-6 p-4 rounded-2xl" style={{ backgroundColor: '#FFFFFF', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
+                  <div className="text-xl font-bold mb-4" style={{ color: COLORS.ink }}>Par statut</div>
+                  <div className="flex flex-col gap-2">
                     {stats.byStatusData.map((d) => (
-                      <BarRow key={d.label} label={d.label} value={d.value} max={Math.max(...stats.byStatusData.map((x) => x.value), 1)} color={d.color} />
+                      <BarRow key={d.id} label={d.label} value={d.value} max={Math.max(...stats.byStatusData.map((x) => x.value), 1)} color={d.color}
+                        onClick={() => toggleDashboardStatus(d.id)} active={dashboardStatus === d.id} dimmed={dashboardStatus !== null && dashboardStatus !== d.id} />
                     ))}
                   </div>
                 </div>
 
                 {stats.topRated.length > 0 && (
-                  <div>
-                    <div className="text-xs uppercase tracking-wide mb-2" style={{ color: COLORS.inkSoft }}>Mieux notés</div>
-                    <div className="flex flex-col gap-1.5">
+                  <div className="mt-6 p-4 rounded-2xl" style={{ backgroundColor: '#FFFFFF', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
+                    <div className="text-xl font-bold mb-4" style={{ color: COLORS.ink }}>Mieux notés</div>
+                    <div className="flex flex-col gap-2">
                       {stats.topRated.map((b) => (
                         <div key={b.id} className="flex items-center justify-between text-sm gap-2">
                           <span className="truncate" style={{ color: COLORS.ink }}>{b.title}</span>
