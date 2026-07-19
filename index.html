@@ -160,7 +160,7 @@ function hexToRgba(hex, alpha) {
 function normalize(s) { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
 function makeId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 function emptyBook() {
-  return { id: null, title: '', author: '', pageCount: '', isbn: '', status: 'a_lire', rating: 0, categories: [], cover: null, startDate: '', endDate: '', pagesRead: '', comment: '' };
+  return { id: null, title: '', author: '', pageCount: '', isbn: '', status: 'a_lire', rating: 0, categories: [], cover: null, startDate: '', endDate: '', pagesRead: '', comment: '', description: '' };
 }
 function progressPercent(book) {
   if (book.status === 'lu') return 100;
@@ -327,6 +327,7 @@ function App() {
   const [importLoading, setImportLoading] = useState(false);
   const [importError, setImportError] = useState('');
   const [importedNote, setImportedNote] = useState(false);
+  const [translating, setTranslating] = useState(false);
 
   const [apiKey, setApiKey] = useState('');
   const [apiKeyInput, setApiKeyInput] = useState('');
@@ -408,6 +409,7 @@ function App() {
       endDate: f['FinLecture'] || '',
       pagesRead: f['PagesLues'] || '',
       comment: f['Commentaire'] || '',
+      description: f['Description'] || '',
     };
   };
 
@@ -426,6 +428,7 @@ function App() {
       'FinLecture': book.endDate || null,
       'PagesLues': book.pagesRead ? parseInt(book.pagesRead, 10) : null,
       'Commentaire': book.comment || null,
+      'Description': book.description || null,
     };
   };
 
@@ -548,7 +551,11 @@ function App() {
   const stats = useMemo(() => {
     const source = dashboardFilteredBooks;
     const luBooks = source.filter((b) => b.status === 'lu');
-    const totalPages = luBooks.reduce((sum, b) => sum + (parseInt(b.pageCount, 10) || 0), 0);
+    // Pages lues au total : livres terminés comptés en entier, livres en cours (ou abandonnés) comptés pour leurs pages lues déclarées.
+    const totalPages = source.reduce((sum, b) => {
+      if (b.status === 'lu') return sum + (parseInt(b.pageCount, 10) || 0);
+      return sum + (parseInt(b.pagesRead, 10) || 0);
+    }, 0);
     const ratedBooks = source.filter((b) => b.rating > 0);
     const avgRating = ratedBooks.length ? ratedBooks.reduce((s, b) => s + b.rating, 0) / ratedBooks.length : null;
 
@@ -621,7 +628,7 @@ function App() {
   };
 
   // ---------- Export CSV (copie locale de secours, en plus d'Airtable) ----------
-  const CSV_HEADERS = ['Titre', 'Auteur', 'Pages', 'ISBN', 'Statut', 'Note', 'Categories', 'Couverture', 'DebutLecture', 'FinLecture', 'PagesLues', 'Commentaire'];
+  const CSV_HEADERS = ['Titre', 'Auteur', 'Pages', 'ISBN', 'Statut', 'Note', 'Categories', 'Couverture', 'DebutLecture', 'FinLecture', 'PagesLues', 'Commentaire', 'Description'];
   const csvEscape = (field) => {
     const str = field === null || field === undefined ? '' : String(field);
     if (/[;"\n\r]/.test(str)) return '"' + str.replace(/"/g, '""') + '"';
@@ -635,7 +642,7 @@ function App() {
         csvEscape(b.title), csvEscape(b.author), csvEscape(b.pageCount), csvEscape(b.isbn),
         csvEscape(st.label), csvEscape(b.rating || ''), csvEscape((b.categories || []).join(', ')),
         csvEscape(b.cover || ''), csvEscape(b.startDate || ''), csvEscape(b.endDate || ''), csvEscape(b.pagesRead || ''),
-        csvEscape(b.comment || ''),
+        csvEscape(b.comment || ''), csvEscape(b.description || ''),
       ].join(';'));
     });
     const csv = '\uFEFF' + rows.join('\r\n');
@@ -686,7 +693,7 @@ function App() {
         const iTitre = idx('Titre'), iAuteur = idx('Auteur'), iPages = idx('Pages'), iIsbn = idx('ISBN'),
           iStatut = idx('Statut'), iNote = idx('Note'), iCategories = idx('Categories'),
           iCouverture = idx('Couverture'), iDebut = idx('DebutLecture'), iFin = idx('FinLecture'), iPagesLues = idx('PagesLues'),
-          iCommentaire = idx('Commentaire');
+          iCommentaire = idx('Commentaire'), iDescription = idx('Description');
         if (iTitre === -1) throw new Error('Colonne "Titre" introuvable — ce fichier vient-il bien d\'un export de cette app ?');
         const newBooks = rows.slice(1).map((r) => {
           const statutLabel = iStatut !== -1 ? (r[iStatut] || '') : '';
@@ -705,6 +712,7 @@ function App() {
             endDate: iFin !== -1 ? (r[iFin] || '') : '',
             pagesRead: iPagesLues !== -1 ? (r[iPagesLues] || '') : '',
             comment: iCommentaire !== -1 ? (r[iCommentaire] || '') : '',
+            description: iDescription !== -1 ? (r[iDescription] || '') : '',
           };
         }).filter((b) => b.title);
         if (newBooks.length === 0) throw new Error('Aucun livre valide (avec un titre) trouvé dans ce fichier.');
@@ -740,6 +748,46 @@ function App() {
     throw lastErr;
   };
 
+  // ---------- Traduction (MyMemory, gratuite, sans clé) ----------
+  const utf8ByteLength = (str) => new TextEncoder().encode(str).length;
+  const splitIntoChunks = (text, maxBytes) => {
+    const sentences = text.split(/(?<=[.!?])\s+/);
+    const chunks = [];
+    let current = '';
+    const pushHardSplit = (sentence) => {
+      let piece = '';
+      for (const ch of sentence) {
+        if (utf8ByteLength(piece + ch) > maxBytes) { if (piece) chunks.push(piece); piece = ch; }
+        else piece += ch;
+      }
+      return piece;
+    };
+    for (const sentence of sentences) {
+      const candidate = current ? current + ' ' + sentence : sentence;
+      if (utf8ByteLength(candidate) > maxBytes) {
+        if (current) chunks.push(current);
+        current = utf8ByteLength(sentence) > maxBytes ? pushHardSplit(sentence) : sentence;
+      } else {
+        current = candidate;
+      }
+    }
+    if (current) chunks.push(current);
+    return chunks;
+  };
+  const translateToFrench = async (text, sourceLang) => {
+    if (!text) return text;
+    const chunks = splitIntoChunks(text, 450);
+    const results = [];
+    for (const chunk of chunks) {
+      const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(chunk)}&langpair=${encodeURIComponent(sourceLang)}|fr`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      results.push((data.responseData && data.responseData.translatedText) || chunk);
+    }
+    return results.join(' ');
+  };
+
   const runImportSearch = async (overrideQuery, overrideMode) => {
     const raw = (overrideQuery !== undefined ? overrideQuery : importQuery).trim();
     const mode = overrideMode || importMode;
@@ -759,7 +807,7 @@ function App() {
         const isbn10 = (ids.find((x) => x.type === 'ISBN_10') || {}).identifier;
         let cover = (info.imageLinks && (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail)) || null;
         if (cover) cover = cover.replace('http://', 'https://');
-        return { title: info.title || 'Sans titre', author: (info.authors || []).join(', '), pageCount: info.pageCount || '', isbn: isbn13 || isbn10 || '', cover };
+        return { title: info.title || 'Sans titre', author: (info.authors || []).join(', '), pageCount: info.pageCount || '', isbn: isbn13 || isbn10 || '', cover, description: info.description || '', language: info.language || '' };
       });
       setImportResults(items);
       if (items.length === 0) setImportError('Aucun résultat. Essaie un autre mot-clé ou un autre mode de recherche.');
@@ -768,9 +816,18 @@ function App() {
     } finally { setImportLoading(false); }
   };
 
-  const applyImportResult = (item) => {
-    setForm((f) => ({ ...f, title: item.title, author: item.author, pageCount: item.pageCount, isbn: item.isbn, cover: item.cover }));
-    setShowImport(false); setImportedNote(true); setImportResults([]); setImportQuery('');
+  const applyImportResult = async (item) => {
+    setShowImport(false); setImportResults([]); setImportQuery('');
+    setForm((f) => ({ ...f, title: item.title, author: item.author, pageCount: item.pageCount, isbn: item.isbn, cover: item.cover, description: item.description || '' }));
+    setImportedNote(true);
+    if (item.description && item.language && item.language !== 'fr') {
+      setTranslating(true);
+      try {
+        const translated = await translateToFrench(item.description, item.language);
+        setForm((f) => ({ ...f, description: translated }));
+      } catch (e) { /* on garde le résumé original (langue source) si la traduction échoue */ }
+      finally { setTranslating(false); }
+    }
   };
 
   const lookupIsbnSilently = async (isbn) => {
@@ -782,14 +839,24 @@ function App() {
       const info = item.volumeInfo || {};
       let cover = (info.imageLinks && (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail)) || null;
       if (cover) cover = cover.replace('http://', 'https://');
+      const description = info.description || '';
       setForm((f) => ({
         ...f,
         title: f.title || info.title || f.title,
         author: f.author || (info.authors || []).join(', ') || f.author,
         pageCount: f.pageCount || info.pageCount || f.pageCount,
         cover: f.cover || cover,
+        description: f.description || description,
       }));
       setImportedNote(true);
+      if (!form.description && description && info.language && info.language !== 'fr') {
+        setTranslating(true);
+        try {
+          const translated = await translateToFrench(description, info.language);
+          setForm((f) => ({ ...f, description: translated }));
+        } catch (e) { /* on garde le résumé original si la traduction échoue */ }
+        finally { setTranslating(false); }
+      }
     } catch (e) { /* l'ISBN scanné reste rempli même si la recherche complémentaire échoue */ }
   };
 
@@ -1246,7 +1313,16 @@ function App() {
                   <label className="text-xs uppercase tracking-wide" style={{ color: COLORS.inkSoft }}>Pages lues</label>
                   {progressPercent(form) !== null && <span className="text-xs font-medium" style={{ color: COLORS.accent }}>{progressPercent(form)}%</span>}
                 </div>
-                <input type="number" min="0" value={form.pagesRead || ''} onChange={(e) => setForm((f) => ({ ...f, pagesRead: e.target.value }))} className="w-full px-3 py-2 rounded-lg text-sm outline-none mt-1" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} placeholder="0" />
+                <input type="number" min="0" value={form.pagesRead || ''} onChange={(e) => {
+                  const val = e.target.value;
+                  setForm((f) => {
+                    const total = parseInt(f.pageCount, 10);
+                    const read = parseInt(val, 10);
+                    const reachedEnd = total && read && read / total >= 0.97;
+                    const shouldAutoComplete = reachedEnd && f.status !== 'lu' && f.status !== 'abandonne';
+                    return { ...f, pagesRead: val, status: shouldAutoComplete ? 'lu' : f.status };
+                  });
+                }} className="w-full px-3 py-2 rounded-lg text-sm outline-none mt-1" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} placeholder="0" />
                 {progressPercent(form) !== null && (
                   <div className="mt-1.5 rounded-full overflow-hidden" style={{ height: 6, backgroundColor: COLORS.card }}>
                     <div style={{ height: 6, width: `${progressPercent(form)}%`, backgroundColor: COLORS.accent, transition: 'width 0.2s' }} />
@@ -1269,6 +1345,21 @@ function App() {
                   <input value={newCategoryInput} onChange={(e) => setNewCategoryInput(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addNewCategory()} placeholder="Nouvelle catégorie" className="flex-1 px-3 py-2 rounded-lg text-sm outline-none" style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink }} />
                   <button onClick={addNewCategory} className="px-3 py-2 rounded-lg text-sm" style={{ backgroundColor: COLORS.paperDark, color: COLORS.ink }}>Ajouter</button>
                 </div>
+              </div>
+
+              <div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs uppercase tracking-wide" style={{ color: COLORS.inkSoft }}>Description</label>
+                  {translating && <span className="flex items-center gap-1 text-xs" style={{ color: COLORS.accent }}><Icon.Loader size={11} color={COLORS.accent} /> Traduction en cours…</span>}
+                </div>
+                <textarea
+                  value={form.description || ''}
+                  onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+                  placeholder="Résumé du livre (rempli automatiquement depuis Google Books, traduit en français si besoin)"
+                  rows={5}
+                  className="w-full px-3 py-2 rounded-lg text-sm outline-none mt-1.5"
+                  style={{ backgroundColor: COLORS.card, border: `1px solid ${COLORS.line}`, color: COLORS.ink, resize: 'vertical', fontFamily: 'inherit' }}
+                />
               </div>
 
               <div>
