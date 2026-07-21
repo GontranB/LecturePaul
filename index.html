@@ -331,6 +331,8 @@ function App() {
   const [importError, setImportError] = useState('');
   const [importedNote, setImportedNote] = useState(false);
   const [translating, setTranslating] = useState(false);
+  const [fetchingCovers, setFetchingCovers] = useState(false);
+  const [coverFetchProgress, setCoverFetchProgress] = useState('');
 
   const [apiKey, setApiKey] = useState('');
   const [apiKeyInput, setApiKeyInput] = useState('');
@@ -769,6 +771,39 @@ function App() {
     throw lastErr;
   };
 
+  const fetchMissingCovers = async () => {
+    const targets = books.filter((b) => !b.cover && b.isbn);
+    if (targets.length === 0) { alert('Aucun livre à traiter : soit tout a déjà une couverture, soit il manque un ISBN pour rechercher.'); return; }
+    const ok = window.confirm(`Rechercher automatiquement la couverture de ${targets.length} livre${targets.length !== 1 ? 's' : ''} via Google Books (à partir de leur ISBN) ?`);
+    if (!ok) return;
+    setFetchingCovers(true); setSaveError('');
+    let updated = books;
+    let found = 0;
+    for (let i = 0; i < targets.length; i++) {
+      const b = targets[i];
+      setCoverFetchProgress(`${i + 1} / ${targets.length} — ${found} trouvée${found !== 1 ? 's' : ''}`);
+      try {
+        const cleanIsbn = b.isbn.replace(/[\s-]/g, '');
+        const url = `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent('isbn:' + cleanIsbn)}&maxResults=1` + (apiKey ? `&key=${encodeURIComponent(apiKey)}` : '');
+        const data = await fetchGoogleBooks(url);
+        const item = (data.items || [])[0];
+        const info = item ? (item.volumeInfo || {}) : {};
+        let cover = (info.imageLinks && (info.imageLinks.thumbnail || info.imageLinks.smallThumbnail)) || null;
+        if (cover) {
+          cover = cover.replace('http://', 'https://');
+          updated = updated.map((x) => (x.id === b.id ? { ...x, cover } : x));
+          found++;
+        }
+      } catch (e) { /* on continue avec les livres suivants même si celui-ci échoue */ }
+      await sleep(250);
+    }
+    setBooks(updated);
+    persist(updated, categories);
+    setFetchingCovers(false);
+    setCoverFetchProgress('');
+    alert(`Terminé : ${found} couverture${found !== 1 ? 's' : ''} retrouvée${found !== 1 ? 's' : ''} sur ${targets.length}.`);
+  };
+
   // ---------- Traduction (MyMemory, gratuite, sans clé) ----------
   const utf8ByteLength = (str) => new TextEncoder().encode(str).length;
   const splitIntoChunks = (text, maxBytes) => {
@@ -956,12 +991,18 @@ function App() {
                     {books.length} livre{books.length !== 1 ? 's' : ''} · {luCount} lu{luCount !== 1 ? 's' : ''}
                     {syncing && <Icon.Loader size={12} color={COLORS.accent} />}
                   </div>
+                  {fetchingCovers && (
+                    <div className="text-xs mt-1 flex items-center gap-1.5" style={{ color: COLORS.accent }}>
+                      <Icon.Loader size={12} color={COLORS.accent} /> Recherche des couvertures… {coverFetchProgress}
+                    </div>
+                  )}
                   <div className="flex gap-3 mt-1.5 flex-wrap">
                     <button onClick={exportData} className="text-xs underline" style={{ color: COLORS.accent }}>Exporter (CSV)</button>
                     <button onClick={triggerImport} className="text-xs underline" style={{ color: COLORS.accent }}>Importer (CSV)</button>
                     <input ref={fileInputRef} type="file" accept=".csv,text/csv" onChange={importData} style={{ display: 'none' }} />
                     <button onClick={pullFromAirtable} className="text-xs underline" style={{ color: COLORS.accent }}>Charger depuis Airtable</button>
                     <button onClick={pushToAirtable} className="text-xs underline" style={{ color: COLORS.accent }}>Sauvegarder vers Airtable</button>
+                    <button onClick={fetchMissingCovers} disabled={fetchingCovers} className="text-xs underline" style={{ color: COLORS.accent }}>Retrouver les couvertures manquantes</button>
                     <button onClick={() => { setShowAirtableField(true); setView('settings'); }} className="text-xs underline" style={{ color: COLORS.inkSoft }}>Réglages</button>
                   </div>
                 </div>
