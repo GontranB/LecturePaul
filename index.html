@@ -104,14 +104,17 @@
   window.addEventListener('error', function (e) {
     var el = document.getElementById('fallback-error');
     if (!el) return;
+    if (e.target && e.target.tagName === 'IMG') return; // couvertures manquantes : déjà gérées proprement par l'app, pas une vraie erreur
     var msg;
     if (e.target && e.target !== window && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
       msg = 'Échec de chargement d\'une ressource : ' + (e.target.src || e.target.href);
+    } else if (e.message) {
+      msg = e.message + '  [' + (e.filename || '?') + ':' + (e.lineno || '?') + ']';
     } else {
-      msg = (e.message || 'Erreur inconnue') + '  [' + (e.filename || '?') + ':' + (e.lineno || '?') + ']';
+      return; // événement sans information exploitable : on n'encombre pas l'écran
     }
     el.style.display = 'block';
-    el.textContent += msg + '\n\n';
+    if (el.textContent.split('\n\n').length < 10) el.textContent += msg + '\n\n';
   }, true);
   window.addEventListener('unhandledrejection', function (e) {
     var el = document.getElementById('fallback-error');
